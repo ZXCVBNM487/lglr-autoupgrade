@@ -32,10 +32,14 @@ _scan_out.txt
 _c.txt
 _t.txt
 
-# ===== 遗留旧打包配置（已弃用，现用 tester.spec）=====
+# ===== 遗留旧打包配置 / 早期 ad-hoc 脚本（已弃用，不入库）=====
 LagrangeAssistant.spec
 LagrangeUpgrade.spec
 LagrangeUpgradeGUI.spec
+拉格朗日助手.spec
+game_launcher.spec
+1_校准坐标.bat
+2_运行升级循环.bat
 
 # ===== 运行时产物 / 诊断输出（非源码，排除）=====
 state.json
