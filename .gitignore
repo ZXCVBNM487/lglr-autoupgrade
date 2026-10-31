@@ -42,10 +42,12 @@ LagrangeUpgradeGUI.spec
 game_launcher.spec
 1_校准坐标.bat
 2_运行升级循环.bat
+3_停止全部.bat
 
 # ===== 运行时产物 / 诊断输出（非源码，排除）=====
 state.json
 gui_err.txt
 survey_shots/
+.run_lock
 
 # 以下保留入库：refs/ 参考图标、源码 .py、tests/、README.md、config.example.json、tester.spec、*.bat
