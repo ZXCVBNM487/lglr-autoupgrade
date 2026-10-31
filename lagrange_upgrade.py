@@ -30,6 +30,7 @@ import base64
 import difflib
 import threading
 import subprocess
+import atexit
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -2511,6 +2512,79 @@ def cmd_daily(adb, qq):
         log(f"资源回执读取失败（不影响领取）：{e}", "warn")
 
 
+# ===================== 单实例锁 + 干净退出 =====================
+# 杜绝“多开抢占同一台设备的 ADB 信道”：同一项目只允许一个实例驱动设备。
+# 用 pid 文件实现；进程被强杀导致锁残留时，靠“pid 是否仍存活”自愈。
+_INSTANCE_LOCK = os.path.join(app_dir(), ".run_lock")
+
+
+def _pid_alive(pid):
+    if not pid or pid <= 0:
+        return False
+    # 优先用 Windows 原生 tasklist 探测（比 os.kill(pid,0) 更可靠，避免误判死进程为存活）
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
+            capture_output=True, timeout=10,
+        ).stdout
+        # 中文 Windows 下 tasklist 输出为 GBK；pid 本身是 ASCII，忽略解码错误即可
+        text = out.decode("gbk", "ignore")
+        # 有匹配进程时输出含该 PID 的数据行；无匹配时只含“信息/INFO”提示行（不含 PID）
+        return str(int(pid)) in text
+    except Exception:
+        # 非 Windows 或 tasklist 不可用，退回 os.kill 探测
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+
+
+def _acquire_instance_lock():
+    try:
+        if os.path.exists(_INSTANCE_LOCK):
+            try:
+                with open(_INSTANCE_LOCK, "r", encoding="utf-8") as f:
+                    old = int((f.read().strip() or "0"))
+            except Exception:
+                old = 0
+            if old and _pid_alive(old):
+                print(f"{C.ERR}⚠ 已有实例在运行 (pid={old})，为避免抢占同一台设备的 ADB 信道，已拒绝启动。{C.R}")
+                print(f"{C.DIM}请先停止旧实例（任务管理器结束 python.exe / 星际猎人测试仪.exe，或运行「停止全部.bat」）。{C.R}")
+                return False
+            try:
+                os.remove(_INSTANCE_LOCK)
+            except OSError:
+                pass
+        with open(_INSTANCE_LOCK, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    except OSError as e:
+        print(f"{C.WARN}无法写入实例锁 {_INSTANCE_LOCK}：{e}（本次不限制多开）{C.R}")
+        return True              # 写入失败则放行，避免把用户挡在门外
+
+
+def _release_instance_lock():
+    try:
+        if os.path.exists(_INSTANCE_LOCK):
+            with open(_INSTANCE_LOCK, "r", encoding="utf-8") as f:
+                cur = f.read().strip()
+            if cur == str(os.getpid()):
+                os.remove(_INSTANCE_LOCK)
+    except OSError:
+        pass
+
+
+def _cleanup_adb(adb):
+    """停止 adb server，彻底释放设备信道（自动脚本停止时调用）"""
+    try:
+        if adb is not None and getattr(adb, "path", None):
+            adb.raw("kill-server", timeout=10)
+            print(f"{C.DIM}[ADB] 已停止 adb server，设备信道已释放{C.R}")
+    except Exception:
+        pass
+
+
 def main():
     os.chdir(app_dir())
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
@@ -2524,6 +2598,16 @@ def main():
     adb = Adb()
     # 统一按 config.device.mode 选设备：模拟器与真机都支持，所有命令用同一台
     _pick_device_by_pref(adb)
+
+    # 单实例锁：自动脚本/日常等会持续驱动设备，禁止第二个实例抢占同一 ADB 信道
+    _LOCK_CMDS = ("autoup", "daily", "all")
+    _KILL_ADB_CMDS = ("autoup", "all")
+    if cmd in _LOCK_CMDS and not _acquire_instance_lock():
+        sys.exit(2)
+    if cmd in _LOCK_CMDS:
+        atexit.register(_release_instance_lock)            # 退出时释放实例锁
+    if cmd in _KILL_ADB_CMDS:
+        atexit.register(lambda: _cleanup_adb(adb))         # 退出时停止 adb server，释放设备
 
     if cmd == "check":
         pass  # Adb() 初始化已打印 adb 路径/设备/分辨率，供 GUI 自检解析
