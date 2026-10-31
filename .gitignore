@@ -2,6 +2,7 @@
 build/
 dist/
 build_log.txt
+build_log_*.txt
 _release_staging/
 __pycache__/
 *.spec.bak
