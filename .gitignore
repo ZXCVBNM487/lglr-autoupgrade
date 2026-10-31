@@ -1,6 +1,8 @@
 # ===== 构建/打包产物（体积大、非源码，禁止入库）=====
 build/
 dist/
+build_log.txt
+_release_staging/
 __pycache__/
 *.spec.bak
 
