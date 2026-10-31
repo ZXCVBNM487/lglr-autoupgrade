@@ -1,0 +1,4 @@
+rapidocr-onnxruntime>=1.2.3
+pillow>=9.0.0
+numpy>=1.23.0
+websocket-client>=1.7.0

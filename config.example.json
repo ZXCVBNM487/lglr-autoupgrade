@@ -1,0 +1,82 @@
+{
+  "btn_box": [350, 530, 800, 700],
+  "time_box_enabled": false,
+  "time_box": [500, 570, 700, 625],
+  "confirm_enabled": false,
+  "confirm_box": [700, 700, 1600, 950],
+  "adb_path": "adb",
+  "device": {
+    "mode": "auto",
+    "serial": ""
+  },
+  "au_target_building": "",
+  "daily": {
+    "enabled": true,
+    "claim_activity": true,
+    "claim_mail": false,
+    "mail_makeup": false,
+    "mail_max": 8,
+    "max_rounds": 10,
+    "claim_tasks": true,
+    "auto_daily": true,
+    "auto_daily_hour": 4
+  },
+  "popup": {
+    "enabled": true,
+    "close_box": [2040, 20, 2170, 100],
+    "keywords": ["¥", "￥", "礼包", "特惠", "购买", "强化点"],
+    "cooldown": 30
+  },
+  "qq": {
+    "enabled": false,
+    "http_url": "http://127.0.0.1:3000",
+    "access_token": "",
+    "target_type": "group",
+    "target_id": 0,
+    "at_qq": 0,
+    "screenshot": true,
+    "cooldown": 300,
+    "level": "all",
+    "merge": false,
+    "notify": {
+      "start": true,
+      "upgrade_click": true,
+      "long_upgrade": true,
+      "insufficient": true,
+      "popup_closed": false,
+      "lost": true,
+      "disconnect": true,
+      "exception": true,
+      "heartbeat": false,
+      "daily_summary": true,
+      "stopped": false
+    },
+    "heartbeat_interval": 3600,
+    "lost_threshold": 3,
+    "long_wait_alert": 14400
+  },
+  "qq_official": {
+    "enabled": false,
+    "app_id": "",
+    "client_secret": "",
+    "target_type": "group",
+    "user_openid": "",
+    "group_openid": "",
+    "member_openid": "",
+    "c2c_event_id": "",
+    "c2c_event_ts": 0,
+    "group_event_id": "",
+    "group_event_ts": 0
+  },
+  "email": {
+    "enabled": false,
+    "host": "smtp.qq.com",
+    "port": 465,
+    "user": "yourname@qq.com",
+    "password": "",
+    "from_addr": "",
+    "to_addr": "yourname@qq.com",
+    "ssl": true,
+    "starttls": false
+  }
+}

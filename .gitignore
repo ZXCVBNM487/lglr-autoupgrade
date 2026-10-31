@@ -1,0 +1,45 @@
+# ===== 构建/打包产物（体积大、非源码，禁止入库）=====
+build/
+dist/
+__pycache__/
+*.spec.bak
+
+# ===== 运行日志（含设备序列号 5ENDU19313001205 等个人信息）=====
+/*.log
+logs/
+
+# ===== 调试截图（根目录 PNG，可能含游戏账号/设备信息）=====
+/*.png
+_launcher_shots/
+
+# ===== 真实配置（含本机路径，且未来可能填入 QQ/邮箱 凭据）=====
+config.json
+
+# ===== 一次性诊断脚本（含硬编码设备序列号，不入库）=====
+diag_times.py
+_crop_now.py
+_crop_regions.py
+_desk_probe.py
+_find_x.py
+_icon_detect.py
+_ocr_game.py
+_win_probe.py
+
+# ===== 临时/诊断文本 =====
+_cli_test_out.txt
+_cli_test_err.txt
+_scan_out.txt
+_c.txt
+_t.txt
+
+# ===== 遗留旧打包配置（已弃用，现用 tester.spec）=====
+LagrangeAssistant.spec
+LagrangeUpgrade.spec
+LagrangeUpgradeGUI.spec
+
+# ===== 运行时产物 / 诊断输出（非源码，排除）=====
+state.json
+gui_err.txt
+survey_shots/
+
+# 以下保留入库：refs/ 参考图标、源码 .py、tests/、README.md、config.example.json、tester.spec、*.bat
