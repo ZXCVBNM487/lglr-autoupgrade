@@ -52,7 +52,7 @@
 
 ### 方式一：下载 exe（推荐新手）
 
-前往 [Releases](https://github.com/ZXCVBNM487/lglr-autoupgrade/releases/latest) 下载 `lglr-tester-v1.0.0.zip`，解压后双击其中的 `星际猎人测试仪.exe` 即可使用，无需安装 Python。
+前往 [Releases](https://github.com/ZXCVBNM487/lglr-autoupgrade/releases/latest) 下载**最新版（Latest）**的发布压缩包（文件名形如 `lglr-tester-vX.Y.Z.zip`），解压后双击其中的 `星际猎人测试仪.exe` 即可使用，无需安装 Python。
 
 ### 方式二：源码运行
 
