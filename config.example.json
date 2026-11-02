@@ -10,6 +10,7 @@
     "serial": ""
   },
   "au_target_building": "",
+  "au_locked_buildings": [],
   "daily": {
     "enabled": true,
     "claim_activity": true,

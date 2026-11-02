@@ -85,6 +85,8 @@ python lagrange_upgrade.py --help
 - `device.mode`：`auto` / `phone` / `emulator` / `serial`
 - `device.serial`：指定设备序列号（`mode=serial` 时生效）
 - `adb_path`：adb 可执行文件路径（默认走系统 `PATH`）
+- `au_target_building`：一键升级循环优先升级的目标建筑名（OCR 模糊匹配，留空则升可见第一个可升设施）
+- `au_locked_buildings`：绝不自动升级的建筑名单（模糊匹配，用于保护保级 / 特殊用途设施）；留空 `[]` 表示不锁定
 - 通知方式（QQ 机器人 / 企业微信等，按需配置）
 
 > 真实的 `config.json` **不会被提交到仓库**，请妥善保管其中的凭据。

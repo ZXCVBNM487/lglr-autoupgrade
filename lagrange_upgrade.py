@@ -119,6 +119,11 @@ DEFAULT_CONFIG = {
     # 例如 "平台指挥中心" / "资源港口" / "战地指挥中心"。留空则队列有空位时升“当前可见第一个可升设施”。
     "au_target_building": "平台指挥中心",
 
+    # 一键升级循环绝不自动升级的建筑名单（OCR 模糊匹配，含该名的设施一律跳过）。
+    # 用于保护你想保级 / 有特殊用途的设施（如“居住区”“研究实验室”）。
+    # 留空（默认）表示不锁定任何建筑。仅匹配「建筑名」，不影响资源/队列等其它逻辑。
+    "au_locked_buildings": [],
+
     # 日常一键领取（活动面板签到/活跃挑战/各活动奖励 + 系统邮件附件）
     # 仅靠 OCR 识别“领取/领奖/签到”按钮点击，绝不会点“升级/购买/充值”，安全。
     "daily": {
@@ -1788,15 +1793,19 @@ def _au_on_base_build(items):
     return any("基地建设" in t for t in texts) and not _au_in_building_detail(items)
 
 
-def _au_select_open_target(items, adb, target=None):
+def _au_select_open_target(items, adb, target=None, locked=None):
     """纯逻辑：从底部队列条里挑一个建筑条目用于打开详情补位。
     返回 (cx, cy, kind) 或 None；kind ∈ {'name','time'} 表示命中的是建筑名还是倒计时文字。
     规则：优先目标建筑（名字含 target）→ 否则最左的建筑名（比倒计时更可靠地点）
-    → 否则最左的倒计时文字兜底。不含任何点击，便于单测。"""
+    → 否则最左的倒计时文字兜底。命中目标/候选名若落在 locked 名单内则跳过（保护保级建筑）。
+    不含任何点击，便于单测。"""
     bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H)
+    _locked = [str(x).strip() for x in (locked or []) if str(x).strip()]
     # 底栏里可能出现的非建筑名文字（标签/状态/资源），不应被当作可点的建筑条目
     _NON_NAME = ("建造队列", "资源", "全部", "队列", "金属", "原料", "核燃料",
                  "建造中", "升级中", "进行中", "使用中", "已暂停", "已满", "暂停")
+    def _locked_hit(name):
+        return any(k in name for k in _locked)
     name_items, time_items = [], []
     for cx, cy, t, sc in items:
         if cy <= bottom or sc < 0.4:
@@ -1807,6 +1816,8 @@ def _au_select_open_target(items, adb, target=None):
         if parse_seconds(ts):                       # 倒计时文字（如 34:30:00）
             time_items.append((cx, cy, ts))
         elif re.search(r"[一-鿿]", ts) and ts not in _NON_NAME and len(ts) >= 2:
+            if _locked_hit(ts):
+                continue                            # 锁定名单内的建筑名直接跳过
             name_items.append((cx, cy, ts))
     if target:
         for cx, cy, t in name_items:
@@ -1826,7 +1837,8 @@ def _au_open_target(adb, items):
     唯一稳定入口是底部『建造队列状态栏』里的建筑条目（点它即开详情）。
     优先目标建筑；没有可读条目时再用底栏左下固定坐标兜底（远离右上角直播挂件，避免误触）。"""
     target = (CONFIG.get("au_target_building") or "").strip()
-    sel = _au_select_open_target(items, adb, target)
+    locked = CONFIG.get("au_locked_buildings") or []
+    sel = _au_select_open_target(items, adb, target, locked)
     if sel:
         log(f"打开建筑详情补位（{sel[2]}）：{sel[0]},{sel[1]}", "step")
         adb.tap(sel[0], sel[1])

@@ -261,6 +261,47 @@ class TestAuSelectOpenTarget(unittest.TestCase):
     def test_empty(self):
         self.assertIsNone(L._au_select_open_target([], self._adb(), target=""))
 
+    def test_lock_skips_target_building(self):
+        # 目标建筑在锁定名单里 → 锁定优先于目标，跳过它，改选其它可见建筑名
+        adb = self._adb()
+        items = [
+            (400, 950, "平台指挥中心", 0.9),   # 目标，但被锁定
+            (300, 950, "资源港口", 0.9),
+        ]
+        sel = L._au_select_open_target(items, adb, target="平台指挥中心", locked=["平台指挥中心"])
+        self.assertEqual(sel, (300, 950, "name"))
+
+    def test_lock_skips_leftmost_then_picks_next(self):
+        # 最左建筑被锁定 → 选下一个最左的可升级建筑名
+        adb = self._adb()
+        items = [
+            (300, 950, "居住区", 0.9),         # 最左，但被锁定
+            (500, 950, "A基地", 0.9),
+            (700, 950, "B基地", 0.9),
+        ]
+        sel = L._au_select_open_target(items, adb, target="", locked=["居住区"])
+        self.assertEqual(sel, (500, 950, "name"))
+
+    def test_lock_all_names_falls_to_time(self):
+        # 所有建筑名都被锁定 → 退化为倒计时文字兜底
+        adb = self._adb()
+        items = [
+            (300, 950, "居住区", 0.9),
+            (500, 950, "研究实验室", 0.9),
+            (400, 950, "34:30:00", 0.9),
+        ]
+        sel = L._au_select_open_target(items, adb, target="", locked=["居住区", "研究实验室"])
+        self.assertEqual(sel, (400, 950, "time"))
+
+    def test_lock_all_names_no_time_returns_none(self):
+        # 建筑名全被锁定且无倒计时 → 返回 None（不会盲点）
+        adb = self._adb()
+        items = [
+            (300, 950, "居住区", 0.9),
+            (500, 950, "研究实验室", 0.9),
+        ]
+        self.assertIsNone(L._au_select_open_target(items, adb, target="", locked=["居住区", "研究实验室"]))
+
 
 class TestAuWake(unittest.TestCase):
     """_au_wake 必须：亮屏时绝不滑动（避免误触游戏 UI），息屏时才上滑解锁。"""
