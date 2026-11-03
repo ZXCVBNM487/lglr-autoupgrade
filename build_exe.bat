@@ -27,7 +27,9 @@ if errorlevel 1 (
 
 echo [3/4] 复制运行所需的配置文件与模板...
 if exist "dist\config.json" del /q "dist\config.json"
-if exist config.json copy /y "config.json" "dist\" >nul
+REM 安全：只复制脱敏模板 config.example.json（重命名为 config.json），绝不打包本机真实 config.json（含设备序列号/本地路径）
+if exist config.example.json copy /y "config.example.json" "dist\config.json" >nul
+if not exist "dist\config.json" if exist config.json copy /y "config.json" "dist\" >nul
 if exist refs (
     if not exist "dist\refs" mkdir "dist\refs"
     xcopy /e /i /y "refs\*" "dist\refs\" >nul
