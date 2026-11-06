@@ -23,6 +23,17 @@
 
 ## 🖥 界面展示
 
+**游戏内实测画面**（adb 截取，2310×1080，已对玩家昵称 / 联盟聊天 / 星区坐标脱敏）：
+
+![星图主界面](docs/screenshots/starmap.png)
+
+带 100px 坐标网格的校准图，用于核对各点击参数：
+
+![星图坐标网格](docs/screenshots/starmap_grid.png)
+
+> 完整的点击坐标 / OCR 区域 / 判定阈值清单见 **[docs/点击坐标参数表.md](docs/点击坐标参数表.md)**，
+> 含设计基准、`scale_box` 缩放规则、各界面参数分组、实测记录与待复核清单。
+
 图形测试仪（`tester.py` / `星际猎人测试仪.exe`）提供：
 
 - 顶部设备模式下拉（`auto` / `phone` / `emulator` / `serial`），一键写回配置；
@@ -30,7 +41,7 @@
 - 右侧实时画面预览与运行日志；
 - 底部状态栏（空闲 / 运行中 / 完成耗时 / 异常退出码）。
 
-> 更直观的截图见 [Releases](https://github.com/ZXCVBNM487/lglr-autoupgrade/releases/latest)。
+> 可下载的 exe 见 [Releases](https://github.com/ZXCVBNM487/lglr-autoupgrade/releases/latest)。
 
 ## 📱 设备支持
 
@@ -84,12 +95,15 @@ python lagrange_upgrade.py --help
 
 - `device.mode`：`auto` / `phone` / `emulator` / `serial`
 - `device.serial`：指定设备序列号（`mode=serial` 时生效）
-- `adb_path`：adb 可执行文件路径（默认走系统 `PATH`）
+- `adb_path`：留空则自动寻找模拟器自带 adb（雷电 / MuMu / 夜神等）；也可填完整路径或 `adb` 走系统 `PATH`
 - `au_target_building`：一键升级循环优先升级的目标建筑名（OCR 模糊匹配，留空则升可见第一个可升设施）
 - `au_locked_buildings`：绝不自动升级的建筑名单（模糊匹配，用于保护保级 / 特殊用途设施）；留空 `[]` 表示不锁定
 - 通知方式（QQ 机器人 / 企业微信等，按需配置）
 
 > 真实的 `config.json` **不会被提交到仓库**，请妥善保管其中的凭据。
+>
+> 需要校准点击坐标 / OCR 区域时，先跑 `python lagrange_upgrade.py scan` 画框标注，
+> 对照 [点击坐标参数表](docs/点击坐标参数表.md) 修改 `btn_box` / `popup.close_box` 等参数。
 
 ## 🗂 项目结构
 
@@ -104,7 +118,7 @@ lglr-autoupgrade/
 ├── config.example.json     # 配置模板（脱敏，不含任何凭据）
 ├── requirements.txt        # 依赖清单
 ├── refs/                   # 测试仪 UI 参考图标
-├── tests/                  # 单元测试（35 项，无需设备 / OCR）
+├── tests/                  # 单元测试（39 项，无需设备 / OCR）
 │   └── test_lagrange.py
 ├── tools/                  # 辅助 / 调试脚本（非核心，按需使用）
 │   ├── adb_diag.py
@@ -113,7 +127,7 @@ lglr-autoupgrade/
 │   ├── lagrange_gui.py
 │   ├── notifier_extra_channels.py
 │   └── _probe_gui.py
-├── docs/                   # 开发笔记
+├── docs/                   # 开发笔记 + 点击坐标参数表 + 脱敏界面截图
 ├── LICENSE                 # MIT 协议
 ├── CONTRIBUTING.md         # 贡献指南
 └── README.md
@@ -125,6 +139,7 @@ lglr-autoupgrade/
 - 基地建设页右上角直播挂件不是"一键升级"，脚本已规避误点。
 - 需游戏处于前台、屏幕常亮；建议先连好设备/模拟器再启动。
 - 同一台设备**只允许一个实例驱动**（autoup / daily / all 已加单实例锁）：重复启动会被拒绝，从根上杜绝两个脚本抢占 ADB 信道互相干扰。停止运行请点 GUI 的停止，或双击仓库根目录的 `3_停止全部.bat`（会一并结束 python 子进程与 adb，彻底释放设备）。
+- 所有坐标以 **2310×1080 为设计基准** 并经 `scale_box` 等比缩放；修改前请看 [点击坐标参数表](docs/点击坐标参数表.md)，尤其注意右上角直播挂件与活动入口兜底坐标这两处禁区/失效项。
 
 ## ⚠️ 免责声明
 
