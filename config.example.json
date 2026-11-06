@@ -4,7 +4,7 @@
   "time_box": [500, 570, 700, 625],
   "confirm_enabled": false,
   "confirm_box": [700, 700, 1600, 950],
-  "adb_path": "adb",
+  "adb_path": "",
   "device": {
     "mode": "auto",
     "serial": ""
@@ -24,7 +24,7 @@
   },
   "popup": {
     "enabled": true,
-    "close_box": [2040, 20, 2170, 100],
+    "close_box": [2080, 20, 2280, 110],
     "keywords": ["¥", "￥", "礼包", "特惠", "购买", "强化点"],
     "cooldown": 30
   },
