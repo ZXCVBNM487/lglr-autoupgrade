@@ -149,4 +149,4 @@ lglr-autoupgrade/
 
 - [RapidOCR](https://github.com/RapidAI/RapidOCR) —— 游戏内文字识别（OCR）
 - [Android Debug Bridge (ADB)](https://developer.android.com/tools/adb) —— 设备控制
-- [March7thAssistant（三月七小助手）](https://github.com/moesnow/March7thAssistant) —— 同类 ADB / OCR 自动化项目的思路参考
+- [March7thAssistant（三月七小助手）](https://github.com/moesnow/March7thAssistant) —— 同类**游戏自动化**项目（PC 端截图 + OCR 方案，崩坏：星穹铁道日常助手，**非 ADB**）的思路参考
