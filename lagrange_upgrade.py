@@ -273,6 +273,178 @@ def load_config():
 CONFIG = load_config()
 
 
+# ==================== 速本方案：多套配置 / 有序建筑清单 / 目标等级 ====================
+# 方案文件与 config.json 同目录（打包后为 exe 所在目录），独立保存，不含任何凭据。
+# 结构：{"active": "方案名", "profiles": {"方案名": {
+#          "note": "...", "strict": false, "locked_buildings": [],
+#          "build_order": [{"name": "建筑名", "target_level": 8}, ...]}}}
+PROFILES_FILE = "profiles.json"
+PROFILE_OFF = "（不启用方案）"
+
+DEFAULT_PROFILES = {
+    "active": "速本",
+    "profiles": {
+        "速本": {
+            "note": "示例：冲本路线，请按你们自己的清单改（build_order 越靠前越优先）",
+            "strict": False,
+            "locked_buildings": [],
+            "build_order": [
+                {"name": "平台指挥中心", "target_level": 8},
+                {"name": "资源港口", "target_level": 10},
+                {"name": "通用港口", "target_level": 10},
+            ],
+        },
+        "补产能": {
+            "note": "示例：资源优先阶段",
+            "strict": False,
+            "locked_buildings": [],
+            "build_order": [
+                {"name": "资源港口", "target_level": 12},
+                {"name": "通用港口", "target_level": 12},
+            ],
+        },
+    },
+}
+
+
+def _profiles_path(path=None):
+    return path or os.path.join(app_dir(), PROFILES_FILE)
+
+
+def load_profiles(path=None):
+    """读取速本方案；文件不存在时自动生成示例模板，坏文件不拖垮主流程。"""
+    p = _profiles_path(path)
+    if not os.path.isfile(p):
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_PROFILES, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log(f"无法生成 {PROFILES_FILE}（{e}），使用内置示例", "warn")
+        return json.loads(json.dumps(DEFAULT_PROFILES))
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("profiles"), dict):
+            raise ValueError("profiles 字段缺失或格式不对")
+        return data
+    except Exception as e:
+        log(f"{PROFILES_FILE} 解析失败（{e}），使用内置示例", "warn")
+        return json.loads(json.dumps(DEFAULT_PROFILES))
+
+
+def save_profiles(data, path=None):
+    try:
+        with open(_profiles_path(path), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def active_profile(path=None):
+    """返回 (方案名, 方案内容)；未启用 / 方案不存在时返回 ('', {})。"""
+    data = load_profiles(path)
+    name = str(data.get("active") or "").strip()
+    if not name or name == PROFILE_OFF:
+        return "", {}
+    prof = (data.get("profiles") or {}).get(name)
+    return (name, prof) if isinstance(prof, dict) else ("", {})
+
+
+def profile_targets(profile):
+    """规整有序清单 -> [(建筑名, 目标等级)]；0 或留空 = 不限等级。"""
+    out, seen = [], set()
+    for row in (profile or {}).get("build_order", []) or []:
+        if isinstance(row, str):
+            name, lvl = row.strip(), 0
+        elif isinstance(row, dict):
+            name = str(row.get("name") or "").strip()
+            try:
+                lvl = int(row.get("target_level") or 0)
+            except (TypeError, ValueError):
+                lvl = 0
+        else:
+            continue
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append((name, max(0, lvl)))
+    return out
+
+
+def profile_locked(profile):
+    """方案锁定名单 + config.json 里的 au_locked_buildings，合并去重保序。"""
+    out = []
+    for x in list((profile or {}).get("locked_buildings") or []) + list(CONFIG.get("au_locked_buildings") or []):
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+_LEVEL_PATTERNS = (
+    re.compile(r"(?:Lv|LV|lv|等级)\s*[.：:]?\s*(\d{1,3})"),
+    re.compile(r"(\d{1,3})\s*级"),
+)
+_LEVEL_EXCLUDE = ("升至", "升到", "目标", "需要", "消耗", "下一级", "升级后", "满级")
+_PROFILE_NON_NAME = ("建造队列", "资源", "全部", "队列", "金属", "原料", "核燃料",
+                     "建造中", "升级中", "进行中", "使用中", "已暂停", "已满", "暂停")
+
+_AU_REACHED = set()      # 进程内：已达目标等级的建筑，避免反复打开同一个面板
+
+
+def parse_level_from_items(items):
+    """从建筑详情面板 OCR 文本里读『当前等级』；读不到返回 None（保守：照常升级）。"""
+    for _, _, t, _ in items or []:
+        s = str(t).strip()
+        if not s or any(k in s for k in _LEVEL_EXCLUDE):
+            continue
+        for pat in _LEVEL_PATTERNS:
+            m = pat.search(s)
+            if m:
+                v = int(m.group(1))
+                if 0 < v <= 200:
+                    return v
+    return None
+
+
+def match_profile_building(items, profile):
+    """当前详情面板属于清单里的哪个建筑；匹配不到返回 None（不启用等级判断）。"""
+    texts = [str(t).strip() for _, _, t, _ in items or []]
+    for name, lvl in profile_targets(profile):
+        if any(name in t for t in texts):
+            return name, lvl
+    return None
+
+
+def profile_pick_target(items, adb, profile, skipped=None, locked=None):
+    """纯逻辑：在底栏可见建筑条目里，按速本清单顺序挑第一个命中的。
+    返回 (cx, cy, 建筑名, 目标等级) 或 None；跳过锁定名单与已达标建筑。"""
+    bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H)
+    _locked = [str(x).strip() for x in (locked or []) if str(x).strip()]
+    _skip = set(skipped or [])
+    names = []
+    for cx, cy, t, sc in items or []:
+        if cy <= bottom or sc < 0.4:
+            continue
+        ts = str(t).strip()
+        if not ts or parse_seconds(ts):          # 倒计时不是建筑名
+            continue
+        if not (re.search(r"[\u4e00-\u9fff]", ts) and len(ts) >= 2):
+            continue
+        if ts in _PROFILE_NON_NAME or any(k in ts for k in _locked):
+            continue
+        names.append((cx, cy, ts))
+    names.sort(key=lambda q: q[0])
+    for name, lvl in profile_targets(profile):
+        if name in _skip:
+            continue
+        for cx, cy, ts in names:
+            if name in ts or ts in name:
+                return (cx, cy, name, lvl)
+    return None
+
+
 # ==================== 通知系统：QQ + 邮箱 双渠道 ====================
 # 更多渠道（Webhook/WinToast 等）见 notifier_extra_channels.py
 
@@ -1835,9 +2007,23 @@ def _au_select_open_target(items, adb, target=None, locked=None):
 def _au_open_target(adb, items):
     """补位：打开一个建筑详情以加入建造队列。
     唯一稳定入口是底部『建造队列状态栏』里的建筑条目（点它即开详情）。
-    优先目标建筑；没有可读条目时再用底栏左下固定坐标兜底（远离右上角直播挂件，避免误触）。"""
+    启用速本方案时按清单顺序挑；strict=true 且清单未命中则不补位（不乱升）；
+    未启用方案时保持原有『单个目标建筑 + 锁定名单』逻辑。"""
+    pname, prof = active_profile()
+    locked = profile_locked(prof) if prof else list(CONFIG.get("au_locked_buildings") or [])
+    if prof:
+        sel = profile_pick_target(items, adb, prof, skipped=_AU_REACHED, locked=locked)
+        if sel:
+            cx, cy, name, lvl = sel
+            log(f"速本方案[{pname}] → {name}（目标 {lvl or '不限'} 级）：{cx},{cy}", "step")
+            adb.tap(cx, cy)
+            time.sleep(2.5)
+            return True
+        if prof.get("strict"):
+            log(f"速本方案[{pname}] 清单里的建筑都没在队列条出现 → 严格模式不补位", "warn")
+            return False
+        log(f"速本方案[{pname}] 未命中清单，回退默认补位逻辑", "warn")
     target = (CONFIG.get("au_target_building") or "").strip()
-    locked = CONFIG.get("au_locked_buildings") or []
     sel = _au_select_open_target(items, adb, target, locked)
     if sel:
         log(f"打开建筑详情补位（{sel[2]}）：{sel[0]},{sel[1]}", "step")
@@ -1848,6 +2034,28 @@ def _au_open_target(adb, items):
     log("未读到队列项，兜底点队列条左下区域", "warn")
     adb.tap(int(adb.w * 0.18), int(adb.h * 0.93))
     time.sleep(2.5)
+    return True
+
+
+def _au_skip_reached(adb, items):
+    """建筑详情里：若清单建筑已达目标等级，记入跳过集合并关面板，避免反复打开。
+    读不到当前等级时一律返回 False（保守，照常升级，绝不因 OCR 漏读而漏升）。"""
+    _, prof = active_profile()
+    if not prof:
+        return False
+    hit = match_profile_building(items, prof)
+    if not hit:
+        return False
+    name, target = hit
+    if target <= 0:
+        return False
+    lvl = parse_level_from_items(items)
+    if lvl is None or lvl < target:
+        return False
+    if name not in _AU_REACHED:
+        log(f"速本方案：{name} 已达 {lvl}/{target} 级，跳过", "ok")
+        _AU_REACHED.add(name)
+    _au_close_panel(adb)
     return True
 
 
@@ -1973,6 +2181,10 @@ def cmd_autoup(adb, qq):
                 # 2a) 已在建筑详情面板 → 直接点升级入口（优先于面板键判断，
                 #     避免把详情页里的“消耗资源”误当一键升级面板处理）
                 if _au_in_building_detail(items):
+                    # 速本方案：当前建筑已达目标等级 → 关面板并记入跳过集合，不再点升级
+                    if _au_skip_reached(adb, items):
+                        fails = 0
+                        continue
                     if _au_tap_upgrade(adb, qq, items):
                         fails = 0
                         continue

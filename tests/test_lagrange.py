@@ -330,5 +330,172 @@ class TestAuWake(unittest.TestCase):
         self.assertIn("swipe", joined)
 
 
+class TestSpeedProfiles(unittest.TestCase):
+    """速本方案：多套配置解析、按清单顺序选目标、等级识别与达标跳过。"""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="lglr_prof_")
+        self.path = os.path.join(self.tmp, "profiles.json")
+        self.prof = {
+            "note": "t",
+            "strict": False,
+            "locked_buildings": ["居住区"],
+            "build_order": [
+                {"name": "平台指挥中心", "target_level": 8},
+                {"name": "资源港口", "target_level": 10},
+                "通用港口",
+                {"name": "", "target_level": 3},
+                {"name": "资源港口", "target_level": 99},
+                {"name": "战地指挥中心", "target_level": "x"},
+            ],
+        }
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_autocreate_template(self):
+        data = L.load_profiles(self.path)
+        self.assertTrue(os.path.isfile(self.path))
+        self.assertEqual(data["active"], "速本")
+        self.assertIn("速本", data["profiles"])
+
+    def test_bad_json_falls_back(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("{broken")
+        self.assertIn("速本", L.load_profiles(self.path)["profiles"])
+
+    def test_active_off_and_missing(self):
+        L.save_profiles({"active": "", "profiles": {"速本": self.prof}}, self.path)
+        self.assertEqual(L.active_profile(self.path), ("", {}))
+        L.save_profiles({"active": "不存在的方案", "profiles": {}}, self.path)
+        self.assertEqual(L.active_profile(self.path), ("", {}))
+
+    def test_active_ok(self):
+        L.save_profiles({"active": "速本", "profiles": {"速本": self.prof}}, self.path)
+        name, prof = L.active_profile(self.path)
+        self.assertEqual(name, "速本")
+        self.assertIn("build_order", prof)
+
+    def test_save_and_reload(self):
+        self.assertTrue(L.save_profiles({"active": "A", "profiles": {"A": self.prof}}, self.path))
+        self.assertEqual(L.load_profiles(self.path)["active"], "A")
+
+    def test_targets_normalize(self):
+        out = L.profile_targets(self.prof)
+        self.assertEqual(out[0], ("平台指挥中心", 8))
+        self.assertEqual(out[1], ("资源港口", 10))
+        self.assertEqual(out[2], ("通用港口", 0))
+        self.assertEqual(len(out), 4)             # 空名 / 重复名去掉，非法等级归 0
+        self.assertEqual(out[-1], ("战地指挥中心", 0))
+
+    def test_targets_empty_profile(self):
+        self.assertEqual(L.profile_targets({}), [])
+        self.assertIsNone(L.match_profile_building([], {}))
+
+    def test_locked_merges_config(self):
+        orig = L.CONFIG
+        L.CONFIG = {"au_locked_buildings": ["研究实验室", "居住区"]}
+        try:
+            self.assertEqual(L.profile_locked(self.prof), ["居住区", "研究实验室"])
+        finally:
+            L.CONFIG = orig
+
+    def test_pick_by_order_not_leftmost(self):
+        items = [(300, 1000, "通用港口", 0.9),
+                 (200, 1000, "资源港口", 0.9),
+                 (100, 1000, "平台指挥中心", 0.9)]
+        sel = L.profile_pick_target(items, _FakeAdb(), self.prof)
+        self.assertEqual(sel[2], "平台指挥中心")
+        self.assertEqual(sel[0], 100)
+
+    def test_pick_skips_locked_and_reached(self):
+        items = [(300, 1000, "居住区", 0.9), (200, 1000, "资源港口", 0.9),
+                 (100, 1000, "平台指挥中心", 0.9)]
+        sel = L.profile_pick_target(items, _FakeAdb(), self.prof,
+                                    skipped={"平台指挥中心"}, locked=["居住区"])
+        self.assertEqual(sel[2], "资源港口")
+
+    def test_pick_ignores_countdown_and_nonname(self):
+        items = [(50, 1000, "34:30:00", 0.9), (60, 1000, "建造队列", 0.9),
+                 (200, 1000, "资源港口", 0.9)]
+        self.assertEqual(L.profile_pick_target(items, _FakeAdb(), self.prof)[2], "资源港口")
+
+    def test_pick_no_match(self):
+        items = [(200, 1000, "陌生设施", 0.9)]
+        self.assertIsNone(L.profile_pick_target(items, _FakeAdb(), self.prof))
+
+    def test_pick_respects_bottom_threshold(self):
+        items = [(200, 300, "资源港口", 0.9)]     # y 不在底部队列条
+        self.assertIsNone(L.profile_pick_target(items, _FakeAdb(), self.prof))
+
+    def test_parse_level_variants(self):
+        for text, want in (("Lv.7", 7), ("LV 12", 12), ("等级 3", 3),
+                           ("等级：9", 9), ("7级", 7)):
+            self.assertEqual(L.parse_level_from_items([(0, 0, text, 0.9)]), want)
+
+    def test_parse_level_excludes_target_text(self):
+        for text in ("升至2级", "目标等级 8", "升至满级", "升级后 5级"):
+            self.assertIsNone(L.parse_level_from_items([(0, 0, text, 0.9)]))
+
+    def test_parse_level_none_when_absent(self):
+        self.assertIsNone(L.parse_level_from_items([(0, 0, "资源港口", 0.9)]))
+        self.assertIsNone(L.parse_level_from_items([]))
+
+    def test_match_profile_building(self):
+        items = [(0, 0, "资源港口", 0.9), (0, 0, "Lv.5", 0.9)]
+        self.assertEqual(L.match_profile_building(items, self.prof), ("资源港口", 10))
+        self.assertIsNone(L.match_profile_building([(0, 0, "陌生设施", 0.9)], self.prof))
+
+    def _patch_skip(self, profile):
+        """替换会碰设备/文件的外部依赖，返回还原函数。"""
+        orig = (L.active_profile, L._au_close_panel, L._AU_REACHED)
+        L.active_profile = lambda *a, **k: ("速本", profile)
+        L._au_close_panel = lambda a: a.calls.append("close")
+        L._AU_REACHED = set()
+
+        def restore():
+            L.active_profile, L._au_close_panel, L._AU_REACHED = orig
+        return restore
+
+    def test_skip_reached_closes_panel(self):
+        adb = _FakeAdb()
+        restore = self._patch_skip({"build_order": [{"name": "资源港口", "target_level": 8}]})
+        try:
+            items = [(0, 0, "资源港口", 0.9), (0, 0, "Lv.8", 0.9)]
+            self.assertTrue(L._au_skip_reached(adb, items))
+            self.assertIn("资源港口", L._AU_REACHED)
+            self.assertIn("close", adb.calls)
+        finally:
+            restore()
+
+    def test_no_skip_when_level_unreadable(self):
+        adb = _FakeAdb()
+        restore = self._patch_skip({"build_order": [{"name": "资源港口", "target_level": 8}]})
+        try:
+            self.assertFalse(L._au_skip_reached(adb, [(0, 0, "资源港口", 0.9)]))
+            self.assertEqual(L._AU_REACHED, set())   # 读不到等级：宁可多升不漏升
+            self.assertNotIn("close", adb.calls)
+        finally:
+            restore()
+
+    def test_no_skip_below_target(self):
+        restore = self._patch_skip({"build_order": [{"name": "资源港口", "target_level": 8}]})
+        try:
+            items = [(0, 0, "资源港口", 0.9), (0, 0, "Lv.5", 0.9)]
+            self.assertFalse(L._au_skip_reached(_FakeAdb(), items))
+        finally:
+            restore()
+
+    def test_no_skip_when_profile_off(self):
+        restore = self._patch_skip({})
+        L.active_profile = lambda *a, **k: ("", {})
+        try:
+            self.assertFalse(L._au_skip_reached(_FakeAdb(), [(0, 0, "资源港口", 0.9)]))
+        finally:
+            restore()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

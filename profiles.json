@@ -1,0 +1,25 @@
+{
+  "active": "速本",
+  "profiles": {
+    "速本": {
+      "note": "示例清单：请改成你们自己的速本配置。build_order 越靠前越优先；target_level 填 0 表示不限等级。strict=true 时清单没命中就不补位。",
+      "strict": false,
+      "locked_buildings": [],
+      "build_order": [
+        {"name": "平台指挥中心", "target_level": 8},
+        {"name": "资源港口", "target_level": 10},
+        {"name": "通用港口", "target_level": 10},
+        {"name": "战地指挥中心", "target_level": 8}
+      ]
+    },
+    "补产能": {
+      "note": "示例：资源优先阶段的第二套方案",
+      "strict": false,
+      "locked_buildings": [],
+      "build_order": [
+        {"name": "资源港口", "target_level": 12},
+        {"name": "通用港口", "target_level": 12}
+      ]
+    }
+  }
+}

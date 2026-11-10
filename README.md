@@ -105,6 +105,41 @@ python lagrange_upgrade.py --help
 > 需要校准点击坐标 / OCR 区域时，先跑 `python lagrange_upgrade.py scan` 画框标注，
 > 对照 [点击坐标参数表](docs/点击坐标参数表.md) 修改 `btn_box` / `popup.close_box` 等参数。
 
+### 🧩 速本方案（多套升级配置保存与切换）
+
+`profiles.json` 与 `config.json` 同目录，保存多套固定的升级配置；测试仪顶部的「速本方案」下拉可一键切换，选择后自动写回 `active`。
+
+```json
+{
+  "active": "速本",
+  "profiles": {
+    "速本": {
+      "note": "冲本路线",
+      "strict": false,
+      "locked_buildings": [],
+      "build_order": [
+        {"name": "平台指挥中心", "target_level": 8},
+        {"name": "资源港口", "target_level": 10}
+      ]
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `build_order` | **有序清单，越靠前越优先**；`autoup` 在底部队列条可见的建筑里按此顺序挑补位目标 |
+| `target_level` | **目标等级**；建筑详情里读到当前等级 ≥ 目标就自动跳过、不再点升级。填 `0` = 不限等级 |
+| `locked_buildings` | 该方案额外锁定的建筑，与 `config.json` 的 `au_locked_buildings` 合并生效 |
+| `strict` | `true` = 清单未命中就**不补位**（严格按方案）；`false` = 回退原有默认补位逻辑（默认，兼容性好） |
+| `active` | 填 `""` 或在下拉里选「（不启用方案）」= 完全走原有逻辑 |
+
+模板见 `profiles.example.json`；`profiles.json` 不存在时程序会自动生成示例。测试仪里的「编辑方案」按钮可直接打开该文件改清单，「刷新」重新载入方案列表。
+
+> 等级识别读的是建筑详情面板里的 OCR 文本（`Lv.7` / `等级 7` / `7级` 这类写法）。
+> 若实机文字格式不同，方案仍会按清单顺序补位，但「到级自动跳过」不会生效——
+> 读不到等级时一律**不跳过**（照常升级），宁可多升也不漏升。
+
 ## 🗂 项目结构
 
 ```

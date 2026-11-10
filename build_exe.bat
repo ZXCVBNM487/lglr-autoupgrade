@@ -30,6 +30,9 @@ if exist "dist\config.json" del /q "dist\config.json"
 REM 安全：只复制脱敏模板 config.example.json（重命名为 config.json），绝不打包本机真实 config.json（含设备序列号/本地路径）
 if exist config.example.json copy /y "config.example.json" "dist\config.json" >nul
 if not exist "dist\config.json" if exist config.json copy /y "config.json" "dist\" >nul
+REM 速本方案：只复制示例模板，绝不覆盖用户自己改过的 dist\profiles.json
+if not exist "dist\profiles.json" if exist profiles.example.json copy /y "profiles.example.json" "dist\profiles.json" >nul
+if exist profiles.example.json copy /y "profiles.example.json" "dist\" >nul
 if exist refs (
     if not exist "dist\refs" mkdir "dist\refs"
     xcopy /e /i /y "refs\*" "dist\refs\" >nul
