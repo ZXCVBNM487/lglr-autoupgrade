@@ -159,6 +159,31 @@ def save_cfg(cfg):
         return False
 
 
+# ===== 速本方案：独立的 profiles.json（不 import 主脚本，保证 GUI 秒开）=====
+PROFILES_PATH = os.path.join(BASE_DIR, "profiles.json")
+PROFILE_OFF = "（不启用方案）"
+
+
+def load_profiles():
+    try:
+        with open(PROFILES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("profiles"), dict):
+            return data
+    except Exception:
+        pass
+    return {"active": "", "profiles": {}}
+
+
+def save_profiles(data):
+    try:
+        with open(PROFILES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def cli_argv(extra, out_path=None):
     """构造调用自身的命令行。打包后即 exe 自身，未打包时是 python + 脚本。"""
     if getattr(sys, "frozen", False):
@@ -286,6 +311,77 @@ def run_gui():
     tk.Button(inner, text="打开日志目录", command=lambda: _open_dir(LOG_DIR),
               bg=BG_LOG, fg=FG_DIM, activebackground=BG_LOG, activeforeground=FG,
               relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right", padx=(0, 6))
+
+    # ---------- 速本方案：多套配置保存 / 切换 ----------
+    prow = tk.Frame(devbox, bg=BG_PANEL)
+    prow.pack(fill="x", padx=12, pady=(0, 10))
+
+    tk.Label(prow, text="速本方案", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    prof_state = {"data": load_profiles()}
+    prof_names = [PROFILE_OFF] + list(prof_state["data"].get("profiles", {}).keys())
+    prof_var = tk.StringVar(value=PROFILE_OFF)
+    prof_cb = ttk.Combobox(prow, textvariable=prof_var, width=16, state="readonly",
+                           values=prof_names, font=FONT_SM)
+    prof_cb.pack(side="left", padx=(6, 10))
+    prof_info = tk.Label(prow, text="", bg=BG_PANEL, fg=FG_DIM, font=FONT_SM)
+    prof_info.pack(side="left")
+
+    def _prof_summary(name):
+        p = prof_state["data"].get("profiles", {}).get(name) or {}
+        rows = p.get("build_order") or []
+        if not rows:
+            return "（空方案）"
+        tops = [str(r.get("target_level") or "不限") if isinstance(r, dict) else "不限"
+                for r in rows[:3]]
+        return f"{len(rows)} 项 · 目标 " + "/".join(tops) + ("…" if len(rows) > 3 else "")
+
+    def _refresh_prof(*_):
+        name = prof_var.get()
+        prof_info.configure(
+            text="按原逻辑补位（未启用速本方案）"
+            if name == PROFILE_OFF or not prof_state["data"].get("profiles", {}).get(name)
+            else _prof_summary(name) + " 级 · 按清单顺序")
+
+    def _reload_profiles():
+        prof_state["data"] = load_profiles()
+        names = [PROFILE_OFF] + list(prof_state["data"].get("profiles", {}).keys())
+        prof_cb["values"] = names
+        cur = str(prof_state["data"].get("active") or "").strip()
+        prof_var.set(cur if cur in names else PROFILE_OFF)
+        _refresh_prof()
+
+    def _on_profile_change(*_):
+        name = prof_var.get()
+        data = load_profiles()          # 重读，避免覆盖用户刚在编辑器里改好的清单
+        data["active"] = "" if name == PROFILE_OFF else name
+        if save_profiles(data):
+            append_log(f"[配置] 速本方案已切换为 {name}\n", "ok")
+        else:
+            messagebox.showerror("失败", "profiles.json 写入失败，可能被占用。")
+        prof_state["data"] = data
+        _refresh_prof()
+
+    def _edit_profiles():
+        if not os.path.isfile(PROFILES_PATH):
+            tpl = os.path.join(BASE_DIR, "profiles.example.json")
+            try:
+                with open(tpl, "r", encoding="utf-8") as f:
+                    save_profiles(json.load(f))
+            except Exception:
+                save_profiles({"active": "", "profiles": {}})
+        try:
+            os.startfile(PROFILES_PATH)
+        except Exception as e:
+            messagebox.showerror("打不开", f"{PROFILES_PATH}\n{e}")
+
+    prof_cb.bind("<<ComboboxSelected>>", _on_profile_change)
+    tk.Button(prow, text="编辑方案", command=_edit_profiles,
+              bg=BG_LOG, fg=ACCENT, activebackground=BG_LOG, activeforeground=ACCENT,
+              relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right")
+    tk.Button(prow, text="刷新", command=_reload_profiles,
+              bg=BG_LOG, fg=FG_DIM, activebackground=BG_LOG, activeforeground=FG,
+              relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right", padx=(0, 6))
+    _reload_profiles()
 
     # ========== 底部状态栏（先占位，避免被主体挤掉） ==========
     status = tk.Frame(root, bg=BG_PANEL)
