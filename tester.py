@@ -159,6 +159,19 @@ def save_cfg(cfg):
         return False
 
 
+# ===== 性能档位（发热 / CPU 占用控制）=====
+# GUI 不 import 主脚本（保证秒开），这里只放标签与轮询间隔的轻量映射；
+# 真正的运行参数在 lagrange_upgrade.py 的 PERF_MODES 里，切换写回 config.json。
+PERF_CHOICES = [("省电（推荐）", "eco"), ("均衡", "balanced"), ("原速（排障）", "turbo")]
+PERF_LABEL_BY_MODE = {m: t for t, m in PERF_CHOICES}
+PERF_DESC = {
+    "eco": "OCR 2 线程 · 每轮间歇 10s · 卡住退避至 90s",
+    "balanced": "OCR 4 线程 · 每轮间歇 5s · 退避至 45s",
+    "turbo": "不限线程 · 不额外等待（发热最高）",
+}
+PERF_POLL_MS = {"eco": 500, "balanced": 300, "turbo": 120}
+
+
 # ===== 速本方案：独立的 profiles.json（不 import 主脚本，保证 GUI 秒开）=====
 PROFILES_PATH = os.path.join(BASE_DIR, "profiles.json")
 PROFILE_OFF = "（不启用方案）"
@@ -259,6 +272,15 @@ def run_gui():
     start_ts = {"t": 0.0}
     log_q = queue.Queue()
     log_file = {"path": None}
+
+    # 性能档位状态：启动时读一次 config.json，切换档位时同步更新（避免每轮轮询都读盘）
+    def _perf_mode():
+        p = (load_cfg() or {}).get("performance")
+        m = str((p or {}).get("mode") or "eco").strip().lower()
+        return m if m in PERF_LABEL_BY_MODE else "eco"
+
+    perf_state = {"mode": _perf_mode(), "poll_ms": 500}
+    perf_state["poll_ms"] = PERF_POLL_MS[perf_state["mode"]]
 
     # ========== 顶部标题 ==========
     header = tk.Frame(root, bg=BG)
@@ -382,6 +404,38 @@ def run_gui():
               bg=BG_LOG, fg=FG_DIM, activebackground=BG_LOG, activeforeground=FG,
               relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right", padx=(0, 6))
     _reload_profiles()
+
+    # ---------- 性能档位：挂机发热 / CPU 占用控制 ----------
+    perrow = tk.Frame(devbox, bg=BG_PANEL)
+    perrow.pack(fill="x", padx=12, pady=(0, 10))
+
+    tk.Label(perrow, text="性能档位", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    perf_var = tk.StringVar(value=PERF_LABEL_BY_MODE[perf_state["mode"]])
+    perf_cb = ttk.Combobox(perrow, textvariable=perf_var, width=15, state="readonly",
+                           values=[t for t, _ in PERF_CHOICES], font=FONT_SM)
+    perf_cb.pack(side="left", padx=(6, 10))
+    perf_info = tk.Label(perrow, text=PERF_DESC[perf_state["mode"]],
+                         bg=BG_PANEL, fg=FG_DIM, font=FONT_SM)
+    perf_info.pack(side="left")
+
+    def _on_perf_change(*_):
+        label = perf_var.get()
+        mode = next((m for t, m in PERF_CHOICES if t == label), "eco")
+        cfg = load_cfg()
+        # config.json 缺 performance 段或该段被写坏时都能安全补上；
+        # 文件不存在也没关系，主脚本 load_config() 会用默认配置合并补全。
+        if not isinstance(cfg.get("performance"), dict):
+            cfg["performance"] = {}
+        cfg["performance"]["mode"] = mode
+        if not save_cfg(cfg):
+            messagebox.showerror("失败", "config.json 写入失败，可能被占用。")
+            return
+        perf_state["mode"] = mode
+        perf_state["poll_ms"] = PERF_POLL_MS[mode]
+        perf_info.configure(text=PERF_DESC[mode])
+        append_log(f"[配置] 性能档位已切换为 {label}；已启动的挂机需重启后生效\n", "ok")
+
+    perf_cb.bind("<<ComboboxSelected>>", _on_perf_change)
 
     # ========== 底部状态栏（先占位，避免被主体挤掉） ==========
     status = tk.Frame(root, bg=BG_PANEL)
@@ -608,7 +662,7 @@ def run_gui():
                 proc_holder["proc"] = p
                 while p.poll() is None:
                     drain()
-                    time.sleep(0.12)
+                    time.sleep(max(0.05, perf_state["poll_ms"] / 1000.0))
                 drain()
                 rc = p.returncode if p.returncode is not None else -1
             except Exception as e:
@@ -664,7 +718,7 @@ def run_gui():
         # 运行中刷新计时
         if running["flag"]:
             elapsed_label.configure(text=f"{time.time() - start_ts['t']:.1f}s")
-        root.after(120, pump)
+        root.after(perf_state["poll_ms"], pump)
 
     # ==================== 截图预览 ====================
     def load_preview():
@@ -713,7 +767,7 @@ def run_gui():
             append_log(f"（自测模式：启动后自动执行 {_cmd}）\n", "warn")
             root.after(1000, lambda: start_cmd(_cmd, "自动测试执行", False))
 
-    root.after(120, pump)
+    root.after(perf_state["poll_ms"], pump)
     root.after(600, load_preview)   # 目录里有上次的截图就先显示出来
     root.mainloop()
 

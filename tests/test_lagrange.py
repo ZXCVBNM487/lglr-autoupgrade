@@ -497,5 +497,125 @@ class TestSpeedProfiles(unittest.TestCase):
             restore()
 
 
+class TestPerformance(unittest.TestCase):
+    """性能/发热控制：档位解析、循环节流退避、健康检查节流（纯逻辑，无需设备）。"""
+
+    def setUp(self):
+        self._saved = (L._AU_LAST_WAKE_CHECK, L._AU_LAST_HEALTH_CHECK, dict(os.environ))
+
+    def tearDown(self):
+        L._AU_LAST_WAKE_CHECK, L._AU_LAST_HEALTH_CHECK = self._saved[:2]
+        os.environ.clear()
+        os.environ.update(self._saved[2])
+
+    def test_three_modes(self):
+        for m, th, itv in (("eco", 2, 10.0), ("balanced", 4, 5.0), ("turbo", 0, 0.0)):
+            p = L.perf_settings(mode=m)
+            self.assertEqual(p["mode"], m)
+            self.assertEqual(p["ocr_threads"], th)
+            self.assertEqual(p["loop_min_interval"], itv)
+            self.assertIn("gui_poll_ms", p)
+
+    def test_invalid_mode_falls_back_to_eco(self):
+        for bad in (None, "", "ultra", 123, {"x": 1}):
+            self.assertEqual(L.perf_settings(mode=bad)["mode"], "eco")
+        self.assertEqual(L.perf_settings(mode="ECO")["mode"], "eco")   # 大小写归一
+
+    def test_read_mode_from_config(self):
+        self.assertEqual(L.perf_settings({"performance": {"mode": "balanced"}})["mode"], "balanced")
+        self.assertEqual(L.perf_settings({"performance": {}})["mode"], "eco")
+        self.assertEqual(L.perf_settings({"performance": "oops"})["mode"], "eco")
+        self.assertEqual(L.perf_settings({})["mode"], "eco")
+
+    def test_numeric_overrides_and_bad_values(self):
+        p = L.perf_settings({"performance": {"mode": "eco", "ocr_threads": 3,
+                                             "loop_min_interval": 7,
+                                             "backoff_max": 40, "gui_poll_ms": 250}})
+        self.assertEqual((p["ocr_threads"], p["loop_min_interval"], p["backoff_max"],
+                          p["gui_poll_ms"]), (3, 7.0, 40.0, 250))
+        bad = L.perf_settings({"performance": {"ocr_threads": -1, "loop_min_interval": "x",
+                                               "backoff_max": 99999, "gui_poll_ms": True}})
+        self.assertEqual((bad["ocr_threads"], bad["loop_min_interval"], bad["backoff_max"],
+                          bad["gui_poll_ms"]), (2, 10.0, 90.0, 500))
+
+    def test_pace_interval_backoff(self):
+        seq = [L.pace_interval(n, 10, 90) for n in range(6)]
+        self.assertEqual(round(seq[0], 1), 10.0)
+        self.assertTrue(all(seq[i] < seq[i + 1] for i in range(4)))
+        self.assertEqual(round(seq[-1], 1), 90.0)
+        self.assertEqual(L.pace_interval(99, 10, 90), 90.0)      # 不超过上限
+        self.assertEqual(L.pace_interval(-5, 10, 90), 10.0)      # 负数按 0 处理
+        self.assertEqual(L.pace_interval(0, 0, 0), 0.0)          # turbo 不节流
+        self.assertAlmostEqual(L.pace_interval(3, 10, 0), 10 * 1.7 ** 3)
+
+    def test_pace_sleep_never_negative(self):
+        self.assertAlmostEqual(L.pace_sleep(3.2, 10), 6.8)
+        self.assertEqual(L.pace_sleep(12, 10), 0.0)
+        self.assertEqual(L.pace_sleep(-1, 10), 11.0)
+
+    def test_should_wake_check(self):
+        self.assertTrue(L.should_wake_check(100, 0, 30))
+        self.assertFalse(L.should_wake_check(120, 95, 30))
+        self.assertTrue(L.should_wake_check(125, 95, 30))
+        self.assertTrue(L.should_wake_check(100, 95, 0))         # every=0 每轮都查
+
+    def test_apply_ocr_env(self):
+        os.environ.pop("OMP_NUM_THREADS", None)
+        L.apply_ocr_env(2)
+        self.assertEqual(os.environ["OMP_NUM_THREADS"], "2")
+        self.assertEqual(os.environ["OMP_WAIT_POLICY"], "PASSIVE")
+        self.assertEqual(os.environ["OMP_DYNAMIC"], "FALSE")
+        os.environ["OMP_NUM_THREADS"] = "8"
+        L.apply_ocr_env(0)                                      # 0 = 不改动
+        self.assertEqual(os.environ["OMP_NUM_THREADS"], "8")
+
+    def test_wake_paced_only_one_full_check(self):
+        from unittest import mock
+        adb = _FakeAdb()
+        full = []
+        orig = L._au_wake
+        L._au_wake = lambda a: full.append(1)
+        try:
+            L._AU_LAST_WAKE_CHECK = 0.0
+            with mock.patch.object(L.time, "monotonic", return_value=1000.0):
+                L._au_wake_paced(adb, 30.0)                     # 到点 → 完整检查
+                L._au_wake_paced(adb, 30.0)                     # 未到点 → 只发 WAKEUP
+            self.assertEqual(len(full), 1)
+            self.assertEqual(adb.calls[-1],
+                             ("shell", "input", "keyevent", "KEYCODE_WAKEUP"))
+            with mock.patch.object(L.time, "monotonic", return_value=1031.0):
+                L._au_wake_paced(adb, 30.0)
+            self.assertEqual(len(full), 2)
+        finally:
+            L._au_wake = orig
+
+    def test_health_paced(self):
+        from unittest import mock
+        hits = []
+        orig = L._au_ensure_game
+        L._au_ensure_game = lambda a, q=None: hits.append(1) or False
+        try:
+            L._AU_LAST_HEALTH_CHECK = 0.0
+            with mock.patch.object(L.time, "monotonic", return_value=2000.0):
+                self.assertFalse(L._au_health_paced(_FakeAdb(), None, 60.0))
+                self.assertFalse(L._au_health_paced(_FakeAdb(), None, 60.0))
+            self.assertEqual(len(hits), 1)
+            with mock.patch.object(L.time, "monotonic", return_value=2061.0):
+                L._au_health_paced(_FakeAdb(), None, 60.0)
+            self.assertEqual(len(hits), 2)
+            L._AU_LAST_HEALTH_CHECK = 0.0
+            with mock.patch.object(L.time, "monotonic", return_value=2000.0):
+                for _ in range(3):
+                    L._au_health_paced(_FakeAdb(), None, 0.0)  # turbo：每轮都查
+            self.assertEqual(len(hits), 5)
+        finally:
+            L._au_ensure_game = orig
+
+    def test_gui_poll_map_matches_core(self):
+        import tester
+        for mode, ms in tester.PERF_POLL_MS.items():
+            self.assertEqual(L.perf_settings(mode=mode)["gui_poll_ms"], ms)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

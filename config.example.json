@@ -9,6 +9,9 @@
     "mode": "auto",
     "serial": ""
   },
+  "performance": {
+    "mode": "eco"
+  },
   "au_target_building": "",
   "au_locked_buildings": [],
   "daily": {
