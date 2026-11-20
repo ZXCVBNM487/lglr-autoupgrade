@@ -115,6 +115,15 @@ DEFAULT_CONFIG = {
         "serial": ""
     },
 
+    # 性能 / 发热控制：长时间挂机时降低 CPU 占用。
+    #   eco      = 省电（默认）：OCR 限 2 线程 + 被动等待，每轮间歇 10 秒，卡住时指数退避到 90 秒
+    #   balanced = 均衡：4 线程 / 5 秒 / 退避 45 秒
+    #   turbo    = 原速：不限线程 / 不额外等待（排障时用，发热最高）
+    # 也可在 performance 里单独覆盖 ocr_threads / loop_min_interval / backoff_max 等数值。
+    "performance": {
+        "mode": "eco"
+    },
+
     # 一键升级自动循环：要自动升级的目标建筑名（OCR 模糊匹配，含该名的第一个设施即命中）。
     # 例如 "平台指挥中心" / "资源港口" / "战地指挥中心"。留空则队列有空位时升“当前可见第一个可升设施”。
     "au_target_building": "",                # 留空=升可见第一个可升设施；填建筑名则优先升它
@@ -271,6 +280,130 @@ def load_config():
 
 
 CONFIG = load_config()
+
+
+# ==================== 性能 / 发热控制 ====================
+# 实测：2310x1080 全屏 RapidOCR 一次约 6~9 秒，且 ONNXRuntime 默认吃满所有 CPU 核心，
+# 推理间隙 OpenMP 工作线程还会自旋忙等。旧循环在界面读不懂时约 2.5 秒一轮不停
+# 「截图 + 全屏 OCR」，长时间挂机 CPU 长期满载、温度飙升。
+# 这里从三处降耗（都不改升级判定逻辑，只改「多久做一次」）：
+#   ① 限制 OMP 线程并关闭自旋等待   ② 主循环最小间隔 + 无进展指数退避
+#   ③ 亮屏/前台健康检查节流（WAKEUP 保活仍每轮发，避免手机自动息屏截到黑屏）
+PERF_MODES = {
+    "eco": {                       # 省电（默认）：长时间挂机推荐
+        "ocr_threads": 2,
+        "loop_min_interval": 10.0,
+        "backoff_max": 90.0,
+        "wake_every": 30.0,
+        "health_every": 60.0,
+        "gui_poll_ms": 500,
+    },
+    "balanced": {                 # 均衡：响应更快，温度适中
+        "ocr_threads": 4,
+        "loop_min_interval": 5.0,
+        "backoff_max": 45.0,
+        "wake_every": 15.0,
+        "health_every": 30.0,
+        "gui_poll_ms": 300,
+    },
+    "turbo": {                    # 原速：排障用，发热最高
+        "ocr_threads": 0,        # 0 = 不设置，交给 onnxruntime 默认（吃满所有核心）
+        "loop_min_interval": 0.0,
+        "backoff_max": 0.0,
+        "wake_every": 0.0,
+        "health_every": 0.0,
+        "gui_poll_ms": 120,
+    },
+}
+PERF_LABELS = {"eco": "省电", "balanced": "均衡", "turbo": "原速"}
+
+
+def perf_settings(config=None, mode=None):
+    """解析性能档位，返回完整参数字典。非法档位/非法数值一律回退默认，绝不抛异常。"""
+    cfg = config if isinstance(config, dict) else CONFIG
+    p = cfg.get("performance") if isinstance(cfg, dict) else None
+    if not isinstance(p, dict):
+        p = {}
+    m = str(mode if mode is not None else p.get("mode", "eco")).strip().lower()
+    if m not in PERF_MODES:
+        m = "eco"
+    out = dict(PERF_MODES[m])
+    out["mode"] = m
+    # 允许配置里单独覆盖数值（只接受合法类型/范围）
+    for key, lo, hi in (("ocr_threads", 0, 64), ("loop_min_interval", 0.0, 600.0),
+                        ("backoff_max", 0.0, 3600.0), ("wake_every", 0.0, 3600.0),
+                        ("health_every", 0.0, 3600.0), ("gui_poll_ms", 50, 5000)):
+        v = p.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi:
+            out[key] = int(v) if key in ("ocr_threads", "gui_poll_ms") else float(v)
+    return out
+
+
+def apply_ocr_env(threads):
+    """必须在 import onnxruntime 之前调用：限制 OMP 线程数 + 关闭忙等自旋。"""
+    if not threads or threads <= 0:
+        return
+    os.environ["OMP_NUM_THREADS"] = str(int(threads))
+    os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
+    os.environ["OMP_DYNAMIC"] = "FALSE"
+
+
+# 模块加载时立即设置，保证后续任何路径 import onnxruntime 都拿到省电参数
+apply_ocr_env(perf_settings()["ocr_threads"])
+
+
+def pace_interval(streak, base, cap, factor=1.7):
+    """连续无进展轮次 → 本轮最小间隔（指数退避，上限 cap）。base<=0 表示不节流。"""
+    if base <= 0:
+        return 0.0
+    n = max(0, int(streak))
+    try:
+        v = float(base) * (float(factor) ** n)
+    except (OverflowError, ValueError):
+        v = float(base)
+    if cap and cap > 0:
+        v = min(float(cap), v)
+    return max(0.0, v)
+
+
+def pace_sleep(elapsed, interval):
+    """本轮已耗时 elapsed 秒时，还需补睡多少秒（不会为负数）。
+    工具函数：主循环改用「每轮固定间歇」而非按总时长扣减——单次 OCR 就可能
+    超过间隔，扣减后等于没有喘息、CPU 又会被占满。"""
+    return max(0.0, float(interval) - float(elapsed))
+
+
+def should_wake_check(now, last, every):
+    """健康检查是否到点。every<=0 表示每轮都查；用单调时钟，不受系统改时间影响。"""
+    if every <= 0:
+        return True
+    return (now - last) >= every
+
+
+_AU_LAST_WAKE_CHECK = 0.0
+_AU_LAST_HEALTH_CHECK = 0.0
+
+
+def _au_wake_paced(adb, every):
+    """亮屏保活：每轮只发一个无害的 WAKEUP（防止手机自动息屏截到黑屏），
+    每隔 every 秒才做一次完整的『查屏状态 + 必要时上滑解锁』，省掉大量 dumpsys。"""
+    global _AU_LAST_WAKE_CHECK
+    now = time.monotonic()
+    if should_wake_check(now, _AU_LAST_WAKE_CHECK, every):
+        _AU_LAST_WAKE_CHECK = now
+        _au_wake(adb)
+    else:
+        adb.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+
+
+def _au_health_paced(adb, qq, every):
+    """前台/掉线自愈检查节流：返回值含义同 _au_ensure_game（True=本轮做过干预）。"""
+    global _AU_LAST_HEALTH_CHECK
+    now = time.monotonic()
+    if not should_wake_check(now, _AU_LAST_HEALTH_CHECK, every):
+        return False
+    _AU_LAST_HEALTH_CHECK = now
+    return _au_ensure_game(adb, qq)
 
 
 # ==================== 速本方案：多套配置 / 有序建筑清单 / 目标等级 ====================
@@ -852,6 +985,7 @@ _ocr = None
 def get_ocr():
     global _ocr
     if _ocr is None:
+        apply_ocr_env(perf_settings()["ocr_threads"])   # 必须在 import onnxruntime 前
         print(f"{C.ACCENT}▸ 正在加载 OCR 模型（首次稍慢）...{C.R}")
         from rapidocr_onnxruntime import RapidOCR
         _ocr = RapidOCR()
@@ -2114,15 +2248,22 @@ def cmd_autoup(adb, qq):
     _pick_device_by_pref(adb)
 
     qq.push("start", "一键升级自动循环已启动（真机/模拟器通用）")
-    log("进入自动升级循环：倒计时驱动，等待期间零占用", "step")
+    perf = perf_settings()
+    log(f"进入自动升级循环：倒计时驱动，等待期间零占用  ·  性能档位 "
+        f"{PERF_LABELS.get(perf['mode'], perf['mode'])}"
+        f"（OCR {perf['ocr_threads'] or '不限'} 线程 / 每轮间歇 {perf['loop_min_interval']:g}s"
+        f" / 卡住退避上限 {perf['backoff_max']:g}s）", "step")
     fails = 0
+    no_progress = 0
     try:
         while True:
+            progress = False
             try:
-                _au_wake(adb)
+                _au_wake_paced(adb, perf["wake_every"])
                 # 0a) 挂机自愈：屏幕灭了就唤醒、游戏被切走/被杀就重新拉起
-                if _au_ensure_game(adb, qq):
+                if _au_health_paced(adb, qq, perf["health_every"]):
                     fails = 0
+                    progress = True
                     continue
 
                 # 0b) 跨天自动日常：过了重置时刻且今天没跑过，先领一轮再继续升级
@@ -2136,6 +2277,7 @@ def cmd_autoup(adb, qq):
                         log(f"跨天日常失败（稍后重试）：{e}", "err")
                         time.sleep(120)
                     fails = 0
+                    progress = True
                     continue
 
                 img = adb.screenshot()
@@ -2168,6 +2310,7 @@ def cmd_autoup(adb, qq):
                     qq.push("long_upgrade", f"队列满载，{fmt_duration(min(qtimes))} 后到期补位")
                     time.sleep(wait)
                     fails = 0
+                    progress = True
                     continue
 
                 # 1b) 连续两次“队列已满”说明队列栏只是 OCR 漏读、其实仍是满载 → 强制歇一轮
@@ -2176,6 +2319,7 @@ def cmd_autoup(adb, qq):
                     log("连续判定『队列已满』，判定为满载但队列栏 OCR 漏读，强制等待 10 分钟", "warn")
                     qq.push("long_upgrade", "队列已满（OCR 漏读），等待 10 分钟后再试")
                     time.sleep(600)
+                    progress = True
                     continue
 
                 # 2a) 已在建筑详情面板 → 直接点升级入口（优先于面板键判断，
@@ -2187,6 +2331,7 @@ def cmd_autoup(adb, qq):
                         continue
                     if _au_tap_upgrade(adb, qq, items):
                         fails = 0
+                        progress = True
                         continue
                     _au_close_panel(adb)   # 点不到升级按钮，关面板回基地重试
                     continue
@@ -2208,6 +2353,7 @@ def cmd_autoup(adb, qq):
                         log("连续 3 次读不到队列且界面无进展 → 熔断，等待 15 分钟", "warn")
                         qq.push("stuck", "读不到队列状态，已熔断并等待 15 分钟", force=True)
                         time.sleep(900)
+                        progress = True
                         continue
                     pos = _au_find(items, "一键升级")
                     if pos is None:
@@ -2260,6 +2406,18 @@ def cmd_autoup(adb, qq):
                     time.sleep(600)
                 else:
                     time.sleep(30)
+            finally:
+                # 每轮结束后固定休息 rest 秒。注意不能按「本轮总时长凑够 iv」扣减：
+                # 实测 2 线程下一次全屏 OCR 就要 10~13 秒，比间隔还长，扣减后等于没有喘息，
+                # CPU 会重新被占满。连续无进展按 1.7 倍指数退避到上限；长睡/成功升级后重置。
+                if progress:
+                    no_progress = 0
+                else:
+                    no_progress += 1
+                rest = pace_interval(no_progress - 1, perf["loop_min_interval"],
+                                     perf["backoff_max"])
+                if rest > 0:
+                    time.sleep(rest)
     except KeyboardInterrupt:
         qq.push("stopped", "一键升级自动循环已手动停止")
         log("已手动停止", "warn")
