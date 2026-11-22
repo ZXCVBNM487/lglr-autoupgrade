@@ -687,6 +687,11 @@ class TestRobustness(unittest.TestCase):
             self.assertEqual(p1, p2)
             self.assertTrue(p1.endswith("20261122_autoup.log"))
 
+    def test_parent_pid_alive(self):
+        import tester
+        self.assertTrue(tester._parent_pid_alive(os.getpid()))
+        self.assertFalse(tester._parent_pid_alive(99999999))
+
 
 class TestDeviceSelection(unittest.TestCase):
     """设备模式重构：serial-only 选择逻辑与 adb devices 解析（纯逻辑，无需设备）。"""

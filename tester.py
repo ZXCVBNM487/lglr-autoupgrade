@@ -43,6 +43,43 @@ def _hide_child_consoles():
     subprocess.Popen.__init__ = patched
 
 
+def _parent_pid_alive(pid):
+    """判断 GUI 父进程是否还在（Windows 用 OpenProcess + GetExitCodeProcess）。"""
+    if os.name != "nt":
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, int(pid))     # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = ctypes.c_ulong()
+    ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+    k32.CloseHandle(h)
+    return bool(ok) and code.value == 259            # STILL_ACTIVE
+
+
+def _watch_parent_process(pid, interval=2.0):
+    """GUI 父进程消失时立即结束本 CLI 子进程。
+
+    之前只靠 GUI 的「停止」按钮，关掉窗口（或 GUI 被强杀）后挂机子进程会一直留在后台。
+    """
+    def loop():
+        while True:
+            time.sleep(interval)
+            if not _parent_pid_alive(pid):
+                try:
+                    sys.stderr.write("[守护] 测试仪已关闭，自动结束后台挂机进程\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                os._exit(0)
+    threading.Thread(target=loop, daemon=True, name="parent-watch").start()
+
+
 def _dispatch_cli():
     """把 --cli 之后的参数还原成 lagrange_upgrade 认识的 argv，然后执行。
 
@@ -75,6 +112,11 @@ def _dispatch_cli():
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    # 父进程（GUI）消失时自动退出，避免关窗口 / GUI 被强杀后挂机子进程残留在后台
+    parent_pid = os.environ.get("_TESTER_PARENT_PID", "")
+    if parent_pid.isdigit():
+        _watch_parent_process(int(parent_pid))
 
     sys.argv = [sys.argv[0]] + argv
     try:
@@ -891,6 +933,7 @@ def run_gui():
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
+        env["_TESTER_PARENT_PID"] = str(os.getpid())   # 子进程据此监测 GUI 是否还活着
 
         def worker():
             rc = -1
@@ -1021,6 +1064,19 @@ def run_gui():
             append_log(f"（自测模式：启动后自动执行 {_cmd}）\n", "warn")
             root.after(1000, lambda: start_cmd(_cmd, "自动测试执行", False))
 
+    def on_close():
+        """关窗口时主动结束挂机子进程（以前只靠「停止」按钮，直接点 X 会残留后台进程）。"""
+        p = proc_holder.get("proc")
+        if p and p.poll() is None:
+            append_log("\n[测试仪] 窗口关闭，正在结束后台挂机进程…\n", "warn")
+            stop_task()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.after(400, _refresh_devices)   # 窗口先显示，再查在线设备（避免拖慢启动）
     root.after(perf_state["poll_ms"], pump)
     root.after(600, load_preview)   # 目录里有上次的截图就先显示出来
