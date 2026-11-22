@@ -173,33 +173,23 @@ def daily_log_path(log_dir, cmd, day=None):
 
 
 # ===== ADB 设备扫描（GUI 直接调 adb，不 import 主脚本，保证秒开）=====
-DEVICE_KIND_PHONE = "真机"
-DEVICE_KIND_EMU = "模拟器"
-DEVICE_KINDS = (DEVICE_KIND_PHONE, DEVICE_KIND_EMU)
-DEVICE_NONE_LABEL = "（不使用此类）"
+DEVICE_AUTO_LABEL = "（自动选择第一个在线设备）"
 DEVICE_STATUS_CN = {
     "device": "在线", "offline": "离线", "unauthorized": "未授权",
     "recovery": "恢复模式", "no permissions": "无权限",
 }
 
 
-def classify_device_serial(serial):
-    """按 adb 序列号判断真机 / 模拟器。127.0.0.1:* / localhost / emulator-* 都算模拟器。"""
-    d = (serial or "").lower()
-    if ("127.0.0.1" in d) or ("localhost" in d) or d.startswith("emulator") or d.startswith("127."):
-        return DEVICE_KIND_EMU
-    return DEVICE_KIND_PHONE
-
-
 def parse_adb_devices(text):
-    """从 `adb devices` 输出里取 status=device 的序列号（保留给旧调用/单测）。"""
+    """从 `adb devices` 输出里取 status=device 的序列号（兼容旧调用/单测）。"""
     return [d["serial"] for d in parse_adb_device_rows(text) if d["online"]]
 
 
 def parse_adb_device_rows(text):
     """解析 `adb devices -l` 的全部设备（含离线/未授权），返回 dict 列表。
 
-    每项：serial / status / status_cn / kind / model / resolution / online。
+    每项：serial / status / status_cn / model / resolution / online。
+    不再猜测真机还是模拟器——序列号特征不可靠，界面统一合并展示所有在线设备。
     """
     rows = []
     for line in (text or "").splitlines()[1:]:
@@ -216,7 +206,6 @@ def parse_adb_device_rows(text):
             "serial": serial,
             "status": status,
             "status_cn": DEVICE_STATUS_CN.get(status, status),
-            "kind": classify_device_serial(serial),
             "model": model,
             "resolution": "未知",
             "online": status == "device",
@@ -224,41 +213,38 @@ def parse_adb_device_rows(text):
     return rows
 
 
-def group_devices(rows):
-    """按真机 / 模拟器归类，返回 {类别: [设备...]}，两类键恒存在。"""
-    out = {k: [] for k in DEVICE_KINDS}
-    for d in rows or []:
-        out.setdefault(d.get("kind", DEVICE_KIND_PHONE), []).append(d)
-    return out
-
-
 def format_device_info(d):
     """一行完整设备信息，用于截图后的反馈与「当前设备」标识。"""
     if not d:
         return "未选择设备"
-    return (f"{d['serial']} ｜ {d['kind']} ｜ {d['status_cn']} ｜ "
+    return (f"{d['serial']} ｜ {d['status_cn']} ｜ "
             f"{d.get('resolution') or '未知'} ｜ 型号 {d.get('model') or '未知'}")
 
 
-def format_device_row(d):
-    """设备清单里的一行。"""
-    return (f"  {d['serial']:<22} {d['status_cn']:<6} "
-            f"{d.get('resolution') or '未知':<12} {d.get('model') or '-'}")
+def compact_online_text(rows):
+    """把所有在线设备紧凑拼成一行文本（合并展示用）。"""
+    online = [d for d in (rows or []) if d["online"]]
+    if not online:
+        return "在线设备（0）：无"
+    parts = []
+    for d in online:
+        res = d.get("resolution") or "未知"
+        model = f" · {d['model']}" if d.get("model") else ""
+        parts.append(f"{d['serial']}（{res}{model}）")
+    return f"在线设备（{len(online)}）：" + " ｜ ".join(parts)
 
 
-def pick_device(rows, kind=None, serial=None):
-    """选择设备：指定 serial 优先（必须在线）；否则按类别挑第一台在线；都不给则全局第一台在线。
-    返回 (设备dict, 错误信息)。"""
+def pick_device(rows, serial=None):
+    """选择设备：指定 serial 优先（必须在线）；否则挑第一台在线。返回 (设备dict, 错误信息)。"""
     rows = rows or []
     if serial:
         hit = next((d for d in rows if d["serial"] == serial and d["online"]), None)
         if hit:
             return hit, ""
         return None, f"设备 {serial} 不在线或不存在"
-    pool = [d for d in rows if d["online"] and (not kind or d["kind"] == kind)]
+    pool = [d for d in rows if d["online"]]
     if not pool:
-        why = f"没有在线的{kind}设备" if kind else "没有在线设备"
-        return None, why
+        return None, "没有在线设备"
     return pool[0], ""
 
 
@@ -302,18 +288,6 @@ def scan_adb_devices(config=None, adb_path=None, timeout=8):
         except Exception:
             pass
     return rows, ""
-
-
-def list_online_devices(config=None, adb_path=None, timeout=8):
-    """兼容旧调用：返回 [(serial, 分辨率, 类别)]，只含在线设备。"""
-    rows, err = scan_adb_devices(config, adb_path, timeout)
-    return [(d["serial"], d["resolution"], d["kind"]) for d in rows if d["online"]], err
-
-
-def test_device_connection(serial, config=None, adb_path=None):
-    """测一次全屏截图（不落盘）。返回 (是否成功, 说明文字)。"""
-    ok, msg, _ = capture_device_shot(serial, None, config, adb_path)
-    return ok, msg
 
 
 def capture_device_shot(serial, out_path=None, config=None, adb_path=None):
@@ -495,27 +469,20 @@ def run_gui():
     devbox = tk.Frame(root, bg=BG_PANEL, highlightthickness=0)
     devbox.pack(fill="x", padx=14, pady=(0, 8))
 
-    # ---------- 设备：真机 / 模拟器 两个独立分类 ----------
+    # ---------- 设备：所有在线设备合并展示（不再区分真机/模拟器）----------
     row1 = tk.Frame(devbox, bg=BG_PANEL)
     row1.pack(fill="x", padx=12, pady=(10, 4))
 
-    tk.Label(row1, text="真机", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
-    phone_var = tk.StringVar(value=DEVICE_NONE_LABEL)
-    phone_cb = ttk.Combobox(row1, textvariable=phone_var, width=32, state="readonly",
-                            values=[DEVICE_NONE_LABEL], font=FONT_SM)
-    phone_cb.pack(side="left", padx=(6, 14))
-
-    tk.Label(row1, text="模拟器", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
-    emu_var = tk.StringVar(value=DEVICE_NONE_LABEL)
-    emu_cb = ttk.Combobox(row1, textvariable=emu_var, width=32, state="readonly",
-                          values=[DEVICE_NONE_LABEL], font=FONT_SM)
-    emu_cb.pack(side="left", padx=(6, 12))
-
+    tk.Label(row1, text="设备", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    dev_var = tk.StringVar(value=DEVICE_AUTO_LABEL)
+    dev_cb = ttk.Combobox(row1, textvariable=dev_var, width=44, state="readonly",
+                          values=[DEVICE_AUTO_LABEL], font=FONT_SM)
+    dev_cb.pack(side="left", padx=(6, 10))
     dev_info = tk.Label(row1, text="", bg=BG_PANEL, fg=FG_DIM, font=FONT_SM)
     dev_info.pack(side="left")
 
     dev_rows = {"all": []}
-    dev_map = {}          # 下拉显示文本 -> (类别, serial)
+    dev_map = {DEVICE_AUTO_LABEL: ""}
     cur_dev = {"row": None}
 
     def _set_current(d, note=""):
@@ -523,7 +490,7 @@ def run_gui():
         if d:
             cur_label.configure(text=f"当前设备：{format_device_info(d)}{note}", fg=OK)
         else:
-            cur_label.configure(text="当前设备：未选择（点「刷新扫描」后选择类别或具体设备）", fg=WARN)
+            cur_label.configure(text="当前设备：自动选择第一个在线设备", fg=WARN)
 
     def _save_serial(serial, label=None):
         cfg = load_cfg()
@@ -537,19 +504,6 @@ def run_gui():
         append_log(f"[配置] 设备已设为 {label or serial or '自动选择'}\n", "ok")
         return True
 
-    def _render_list(rows):
-        groups = group_devices(rows)
-        lines = []
-        for kind in DEVICE_KINDS:
-            items = groups.get(kind, [])
-            lines.append(f"── {kind}（{len(items)} 台）──")
-            lines += [format_device_row(d) for d in items] if items else ["  （无）"]
-        txt = "\n".join(lines)
-        dev_list.configure(state="normal")
-        dev_list.delete("1.0", "end")
-        dev_list.insert("1.0", txt)
-        dev_list.configure(state="disabled")
-
     def _refresh_devices(*_):
         rows, err = scan_adb_devices()
         if err:
@@ -557,68 +511,37 @@ def run_gui():
             append_log(f"[设备] 扫描失败：{err}\n", "warn")
             return
         dev_rows["all"] = rows
-        groups = group_devices(rows)
+        online = [d for d in rows if d["online"]]
         dev_map.clear()
-        for kind in DEVICE_KINDS:
-            items = groups.get(kind, [])
-            online = [d for d in items if d["online"]]
-            labels = [DEVICE_NONE_LABEL]
-            if online:
-                auto = f"自动 · 使用{kind}第一台（{online[0]['serial']}）"
-                dev_map[auto] = (kind, online[0]["serial"])
-                labels.append(auto)
-            for d in items:
-                label = f"{d['serial']} · {d['status_cn']} · {d.get('resolution') or '未知'}"
-                dev_map[label] = (kind, d["serial"])
-                labels.append(label)
-            (phone_cb if kind == DEVICE_KIND_PHONE else emu_cb)["values"] = labels
-        # 恢复配置里已保存的选择（两类互斥，只点亮一侧）
+        dev_map[DEVICE_AUTO_LABEL] = ""
+        labels = [DEVICE_AUTO_LABEL]
+        for d in online:
+            label = f"{d['serial']} · {d.get('resolution') or '未知'}"
+            if d.get("model"):
+                label += f" · {d['model']}"
+            dev_map[label] = d["serial"]
+            labels.append(label)
+        dev_cb["values"] = labels
         cur = str((load_cfg().get("device", {}) or {}).get("serial") or "").strip()
-        phone_var.set(DEVICE_NONE_LABEL)
-        emu_var.set(DEVICE_NONE_LABEL)
-        hit = None
-        for label, (kind, serial) in dev_map.items():
-            if serial == cur:
-                hit = (label, kind, next((d for d in rows if d["serial"] == cur), None))
-                break
-        if hit:
-            (phone_var if hit[1] == DEVICE_KIND_PHONE else emu_var).set(hit[0])
-            _set_current(hit[2])
-        else:
-            _set_current(None)
-        _render_list(rows)
-        n_online = sum(1 for d in rows if d["online"])
-        dev_info.configure(text=f"共 {len(rows)} 台 · 在线 {n_online} 台")
-        append_log(f"[设备] 扫描完成：真机 {len(groups.get(DEVICE_KIND_PHONE, []))} 台 / "
-                   f"模拟器 {len(groups.get(DEVICE_KIND_EMU, []))} 台 · 在线 {n_online} 台\n", "info")
+        dev_var.set(next((l for l, s in dev_map.items() if s == cur), DEVICE_AUTO_LABEL))
+        _set_current(next((d for d in rows if d["serial"] == cur), None) if cur else None)
+        online_label.configure(text=compact_online_text(rows))
+        ignored = len(rows) - len(online)
+        dev_info.configure(text=f"共 {len(rows)} 台 · 在线 {len(online)} 台"
+                           + (f" · 忽略 {ignored} 台离线/未授权" if ignored else ""))
+        append_log(f"[设备] 扫描完成：在线 {len(online)} 台，已合并展示\n", "info")
 
-    def _on_kind_change(which):
-        label = phone_var.get() if which == "phone" else emu_var.get()
-        if label == DEVICE_NONE_LABEL:
-            return
-        pair = dev_map.get(label)
-        if not pair:
-            return
-        kind, serial = pair
-        (emu_var if which == "phone" else phone_var).set(DEVICE_NONE_LABEL)  # 两类互斥
-        row = next((d for d in dev_rows["all"] if d["serial"] == serial), None)
-        if row and not row["online"]:
-            messagebox.showwarning("提示", f"{serial} 当前为「{row['status_cn']}」，不能用于截图，请选在线设备。")
-            return
+    def _on_device_change(*_):
+        label = dev_var.get()
+        serial = dev_map.get(label, "")
+        row = next((d for d in dev_rows["all"] if d["serial"] == serial), None) if serial else None
         if _save_serial(serial, label):
-            _set_current(row or {"serial": serial, "kind": kind, "status_cn": "在线",
-                                 "resolution": "未知", "model": ""})
+            _set_current(row)
             dev_info.configure(text=f"已选：{label}")
 
     def _capture_selected():
-        serial = ""
-        for var in (phone_var, emu_var):
-            label = var.get()
-            if label != DEVICE_NONE_LABEL and label in dev_map:
-                serial = dev_map[label][1]
-                break
-        if not serial and cur_dev["row"]:
-            serial = cur_dev["row"]["serial"]
+        label = dev_var.get()
+        serial = dev_map.get(label, "")
         rows = dev_rows["all"] or scan_adb_devices()[0]
         dev, err = (pick_device(rows, serial=serial) if serial else pick_device(rows))
         if not dev:
@@ -634,14 +557,14 @@ def run_gui():
             append_log(f"[设备] 截图失败 → {format_device_info(dev)}：{msg}\n", "err")
             messagebox.showwarning("截图失败", f"{format_device_info(dev)}\n{msg}")
             return
+        dev_var.set(next((l for l, s in dev_map.items() if s == dev["serial"]), DEVICE_AUTO_LABEL))
         _set_current(dev, " · 已截图")
         dev_info.configure(text=f"截图完成：{msg}")
         append_log(f"[设备] 截图完成 → {format_device_info(dev)} ｜ {msg} ｜ 文件 {out}\n", "ok")
-        set_status(f"当前设备：{dev['serial']}（{dev['kind']}）｜{msg}", OK)
+        set_status(f"当前设备：{dev['serial']}｜{msg}", OK)
         root.after(150, load_preview)
 
-    phone_cb.bind("<<ComboboxSelected>>", lambda *_: _on_kind_change("phone"))
-    emu_cb.bind("<<ComboboxSelected>>", lambda *_: _on_kind_change("emu"))
+    dev_cb.bind("<<ComboboxSelected>>", _on_device_change)
     tk.Button(row1, text="截图所选", command=_capture_selected,
               bg=BG_LOG, fg=ACCENT, activebackground=BG_LOG, activeforeground=ACCENT,
               relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right")
@@ -657,17 +580,16 @@ def run_gui():
 
     row2 = tk.Frame(devbox, bg=BG_PANEL)
     row2.pack(fill="x", padx=12, pady=(0, 4))
-    cur_label = tk.Label(row2, text="当前设备：未选择", bg=BG_PANEL, fg=WARN, font=FONT_SM)
+    cur_label = tk.Label(row2, text="当前设备：自动选择第一个在线设备",
+                         bg=BG_PANEL, fg=WARN, font=FONT_SM)
     cur_label.pack(side="left")
 
     row3 = tk.Frame(devbox, bg=BG_PANEL)
     row3.pack(fill="x", padx=12, pady=(0, 10))
-    dev_list = tk.Text(row3, height=6, bg=BG_LOG, fg=FG_DIM, font=FONT_SM,
-                       relief="flat", wrap="none", borderwidth=0)
-    dev_list.pack(fill="x", side="left", expand=True)
-    dev_list.configure(state="disabled")
+    online_label = tk.Label(row3, text=compact_online_text([]), bg=BG_PANEL, fg=FG_DIM,
+                            font=FONT_SM, wraplength=w - 80, justify="left", anchor="w")
+    online_label.pack(fill="x")
 
-    # ---------- 速本方案：多套配置保存 / 切换 ----------
     prow = tk.Frame(devbox, bg=BG_PANEL)
     prow.pack(fill="x", padx=12, pady=(0, 10))
 
@@ -925,8 +847,8 @@ def run_gui():
         cfg = load_cfg()
         d = cfg.get("device", {}) if isinstance(cfg, dict) else {}
         cur = str(d.get("serial") or "").strip()
-        hit = next((x for x in dev_rows["all"] if x["serial"] == cur), None)
-        _set_current(hit)
+        dev_var.set(next((l for l, s in dev_map.items() if s == cur), DEVICE_AUTO_LABEL))
+        _set_current(next((x for x in dev_rows["all"] if x["serial"] == cur), None))
 
     # ==================== 任务执行 ====================
     def stop_task():

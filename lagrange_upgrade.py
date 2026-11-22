@@ -996,12 +996,6 @@ def scale_box(adb, box):
     return (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy))
 
 
-def _is_emulator_serial(dev):
-    """模拟器通道的 adb 序列号特征（现在只用于界面显示标签，不参与设备选择）。"""
-    d = (dev or "").lower()
-    return ("127.0.0.1" in d) or ("localhost" in d) or d.startswith("emulator")
-
-
 def select_device(devs, want=""):
     """从在线设备列表里挑一台。返回 (serial, why, error)。
 
@@ -1036,11 +1030,10 @@ def _pick_device_by_pref(adb):
     changed = (adb.device != target)
     if changed:
         adb.set_device(target)
-    kind = "模拟器" if _is_emulator_serial(target) else "真机"
-    if changed:
+        # 不再猜测真机/模拟器：序列号特征不可靠，界面统一合并展示在线设备
         print(f"{C.ACCENT}▸ 设备{C.R}     {C.HL}{adb.device}{C.R}  "
-              f"{C.DIM}{adb.w}x{adb.h} · {kind} · {why}{C.R}")
-    return changed, kind
+              f"{C.DIM}{adb.w}x{adb.h} · {why}{C.R}")
+    return changed, why
 
 
 

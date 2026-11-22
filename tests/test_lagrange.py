@@ -117,16 +117,6 @@ class TestResDiff(unittest.TestCase):
         self.assertEqual(L._au_res_diff(before, after), [])
 
 
-class TestIsEmulatorSerial(unittest.TestCase):
-    def test_emulator(self):
-        self.assertTrue(L._is_emulator_serial("127.0.0.1:16384"))
-        self.assertTrue(L._is_emulator_serial("emulator-5554"))
-        self.assertTrue(L._is_emulator_serial("localhost:5555"))
-
-    def test_phone(self):
-        self.assertFalse(L._is_emulator_serial("ABCDEF1234567890"))
-
-
 class TestFindButton(unittest.TestCase):
     def setUp(self):
         self.items = [
@@ -755,14 +745,13 @@ class TestDeviceSelection(unittest.TestCase):
         self.assertEqual(tester.parse_adb_devices(""), [])
         self.assertEqual(tester.parse_adb_devices("List of devices attached\n"), [])
 
-    def test_device_kind_constants(self):
+    def test_device_auto_label(self):
         import tester
-        self.assertEqual(tester.DEVICE_KINDS, ("真机", "模拟器"))
-        self.assertIn("不使用", tester.DEVICE_NONE_LABEL)
+        self.assertIn("自动", tester.DEVICE_AUTO_LABEL)
 
 
-class TestDeviceClassification(unittest.TestCase):
-    """真机 / 模拟器分类扫描：全状态解析、归类、选择与设备信息格式化。"""
+class TestDeviceListMerge(unittest.TestCase):
+    """合并后的在线设备列表：全状态解析、紧凑展示、选择与截图反馈。"""
 
     SAMPLE = ("List of devices attached\n"
               "127.0.0.1:16384  device product:ali model:PGBM10 device:ali transport_id:1\n"
@@ -776,56 +765,50 @@ class TestDeviceClassification(unittest.TestCase):
         return tester.parse_adb_device_rows(self.SAMPLE)
 
     def test_parse_all_statuses(self):
-        import tester
+        import tester as T
         rows = self._rows()
         self.assertEqual(len(rows), 4)                    # daemon 提示行被忽略
         self.assertEqual(rows[0]["status_cn"], "在线")
         self.assertEqual(rows[1]["status_cn"], "离线")
         self.assertEqual(rows[2]["status_cn"], "未授权")
         self.assertEqual(rows[0]["model"], "PGBM10")
-        self.assertTrue(rows[0]["online"])
-        self.assertFalse(rows[1]["online"])
-        self.assertEqual(tester.parse_adb_devices(self.SAMPLE),
+        self.assertNotIn("kind", rows[0])                # 不再猜测真机/模拟器
+        self.assertEqual(T.parse_adb_devices(self.SAMPLE),
                          ["127.0.0.1:16384", "emulator-5554"])
 
-    def test_classify_serial(self):
-        import tester as T
-        for s in ("127.0.0.1:16384", "localhost:5555", "emulator-5554", "127.0.0.2:7555"):
-            self.assertEqual(T.classify_device_serial(s), T.DEVICE_KIND_EMU)
-        for s in ("5ENDU19313001205", "ABCDEF123456", "0123456789ABCDEF"):
-            self.assertEqual(T.classify_device_serial(s), T.DEVICE_KIND_PHONE)
-
-    def test_group_devices(self):
-        import tester as T
-        g = T.group_devices(self._rows())
-        self.assertEqual(set(g), {"真机", "模拟器"})
-        self.assertEqual(len(g["真机"]), 1)
-        self.assertEqual(len(g["模拟器"]), 3)
-        self.assertEqual(T.group_devices([]), {"真机": [], "模拟器": []})
-
-    def test_pick_by_kind_and_serial(self):
+    def test_compact_online_text(self):
         import tester as T
         rows = self._rows()
-        self.assertEqual(T.pick_device(rows, kind=T.DEVICE_KIND_EMU)[0]["serial"],
-                         "127.0.0.1:16384")
-        self.assertEqual(T.pick_device(rows, serial="emulator-5554")[0]["kind"],
-                         T.DEVICE_KIND_EMU)
-        dev, err = T.pick_device(rows, kind=T.DEVICE_KIND_PHONE)
-        self.assertIsNone(dev)                            # 唯一真机未授权
-        self.assertIn("没有在线的真机设备", err)
-        dev2, err2 = T.pick_device(rows, serial="127.0.0.1:5555")
-        self.assertIsNone(dev2)                           # 离线设备不可选
-        self.assertIn("不在线", err2)
-        self.assertEqual(T.pick_device(rows)[0]["serial"], "127.0.0.1:16384")
+        for d in rows:
+            d["resolution"] = "1600x900"
+        txt = T.compact_online_text(rows)
+        self.assertIn("在线设备（2）", txt)
+        self.assertIn("127.0.0.1:16384", txt)
+        self.assertIn("emulator-5554", txt)
+        self.assertNotIn("127.0.0.1:5555", txt)          # 离线设备不挤进来
+        self.assertNotIn("5ENDU19313001205", txt)        # 未授权设备不挤进来
+        self.assertEqual(T.compact_online_text([]), "在线设备（0）：无")
 
-    def test_format_device_info_and_row(self):
+    def test_pick_device_merged(self):
+        import tester as T
+        rows = self._rows()
+        self.assertEqual(T.pick_device(rows)[0]["serial"], "127.0.0.1:16384")
+        self.assertEqual(T.pick_device(rows, serial="emulator-5554")[0]["serial"],
+                         "emulator-5554")
+        dev, err = T.pick_device(rows, serial="127.0.0.1:5555")
+        self.assertIsNone(dev)                            # 离线设备不可选
+        self.assertIn("不在线", err)
+        self.assertIsNone(T.pick_device([d for d in rows if not d["online"]])[0])
+
+    def test_format_device_info_has_no_kind(self):
         import tester as T
         d = self._rows()[0]
         d["resolution"] = "1600x900"
         info = T.format_device_info(d)
-        for kw in ("127.0.0.1:16384", "模拟器", "在线", "1600x900", "PGBM10"):
+        for kw in ("127.0.0.1:16384", "在线", "1600x900", "PGBM10"):
             self.assertIn(kw, info)
-        self.assertIn("在线", T.format_device_row(d))
+        self.assertNotIn("真机", info)
+        self.assertNotIn("模拟器", info)
         self.assertEqual(T.format_device_info(None), "未选择设备")
 
     def test_scan_ignores_daemon_notice(self):
