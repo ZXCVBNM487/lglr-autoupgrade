@@ -1045,5 +1045,61 @@ class TestActivitySidebarRegion(unittest.TestCase):
         self.assertEqual(len(L._select_activity_entries(items, F())), 4)
 
 
+class TestAutoupTargetAndQueueState(unittest.TestCase):
+    """2026-11-22 实机 bug：底部导航被当建筑点；队列 2/2 满未参与判定。"""
+
+    def test_select_ignores_navigation_words(self):
+        items = [(82, 856, "返回地图", 0.9), (801, 823, "基地建设", 0.9),
+                 (1521, 850, "行政", 0.9), (1090, 831, "通用港口4", 0.9)]
+        sel = L._au_select_open_target(items, _FakeAdb(1600, 900), "平台指挥中心", [])
+        self.assertIsNotNone(sel)
+        self.assertEqual(sel[2], "name")
+        self.assertGreater(sel[0], 1000)          # 绝不能是左侧「返回地图」的 x=82
+
+    def test_queue_full_by_state_even_with_one_timer(self):
+        items = [(801, 853, "2/2", 0.9), (1074, 852, "01:50:52", 0.9)]
+        self.assertTrue(L._au_queue_full(items, _FakeAdb(1600, 900)))
+        self.assertFalse(L._au_queue_full(
+            [(801, 853, "1/2", 0.9)], _FakeAdb(1600, 900)))
+        self.assertTrue(L._au_queue_full(
+            [(800, 850, "建造队列已满", 0.9)], _FakeAdb(1600, 900)))
+
+    def test_profile_pick_ignores_navigation(self):
+        prof = {"build_order": [{"name": "基地", "target_level": 5}]}
+        items = [(82, 856, "返回地图", 0.9), (1521, 850, "行政", 0.9)]
+        self.assertIsNone(L.profile_pick_target(items, _FakeAdb(1600, 900), prof))
+
+    def test_expanded_view_navigation_not_picked(self):
+        # 基地页展开视图底部全是功能键，曾被当成建筑点，导致两种视图来回切换
+        items = [(199, 859, "对接信息", 0.9), (307, 859, "视野收集", 0.9),
+                 (1513, 858, "环绕视角", 0.9), (73, 863, "基地", 0.9),
+                 (801, 823, "基地建设", 0.9)]
+        self.assertIsNone(L._au_select_open_target(items, _FakeAdb(1600, 900), "", []))
+
+    def test_on_base_build_requires_back_map(self):
+        # 星图里的提示文字「基地建设-舰队编组」不能算已在基地页
+        star = [(328, 596, "基地建设-舰队编组", 0.9), (73, 863, "基地", 0.9)]
+        self.assertFalse(L._au_on_base_build(star))
+        base = [(82, 856, "返回地图", 0.9), (801, 823, "基地建设", 0.9),
+                (801, 853, "2/2", 0.9)]
+        self.assertTrue(L._au_on_base_build(base))
+
+    def test_bottom_nav_ignores_mid_screen_hint(self):
+        # 星图中部「基地建设-舰队编组」不能当底部导航；真正按钮在 (73,863)
+        items = [(328, 596, "基地建设-舰队编组", 0.84), (73, 863, "基地", 0.66)]
+        fake = _FakeAdb(1600, 900)
+        self.assertEqual(L._au_bottom_nav(items, fake, "基地"), (73, 863))
+        self.assertIsNone(L._au_bottom_nav(items, fake, "基地建设"))
+
+    def test_autoup_never_uses_system_back_key(self):
+        # 硬约束：系统返回键会弹「确定退出游戏」，旧实现在此无限循环
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        # 注释里会提到 keyevent，因此只检查真正的调用语句
+        self.assertNotIn('"input", "keyevent"', src)
+        self.assertNotIn("'input', 'keyevent'", src)
+        self.assertNotIn('"keyevent", "4"', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

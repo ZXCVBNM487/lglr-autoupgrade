@@ -536,7 +536,8 @@ def profile_pick_target(items, adb, profile, skipped=None, locked=None):
             continue
         if not (re.search(r"[\u4e00-\u9fff]", ts) and len(ts) >= 2):
             continue
-        if ts in _PROFILE_NON_NAME or any(k in ts for k in _locked):
+        if ts in _PROFILE_NON_NAME or any(k in ts for k in _AU_NAV_WORDS) \
+                or any(k in ts for k in _locked):
             continue
         names.append((cx, cy, ts))
     names.sort(key=lambda q: q[0])
@@ -1774,6 +1775,17 @@ def _au_find(items, keyword, min_score=0.5):
     return best
 
 
+def _au_bottom_nav(items, adb, keyword):
+    """只在底部导航区（y > 0.78h）找关键词，取最靠下的命中。
+
+    实机教训：星图中部提示文字「基地建设-舰队编组」会被普通 _au_find("基地")
+    命中，但其 y≈596 不在底部，点了没反应还让主循环误判「页面未识别」。
+    """
+    hits = [(int(x), int(y)) for x, y, t, sc in items or []
+            if keyword in str(t) and y > adb.h * 0.78 and sc >= 0.4]
+    return max(hits, key=lambda p: p[1]) if hits else None
+
+
 
 
 def _pick_eta(items):
@@ -2094,6 +2106,34 @@ def _au_handle_panel(adb, qq, items):
 
 
 _AU_BOTTOM_Y = 900      # 底部建造队列状态栏（倒计时/2-2）所在区域 y 下界
+# 底部队列条的真实区域（设计基准）：建筑名/倒计时在这里；左侧「返回地图」、底部
+# 「基地建设 / 行政」是导航，绝不能当成可点的建筑条目（2026-11-22 实机 bug）。
+_AU_QUEUE_BAR_BOX = (1450, 880, 2150, 1010)
+_AU_NAV_WORDS = ("返回地图", "返回", "基地建设", "基地", "行政", "星图", "计划",
+                 "舰队", "战报", "商业中心", "商城", "蓝图", "研究", "活动时",
+                 # 基地页展开视图底部的导航/功能键，绝不能当建筑点（2026-11-22 实测死循环根因）
+                 "对接信息", "视野收集", "环绕视角", "舰队编组", "战舰生产", "资源管理",
+                 "舰船管理", "情报搜索", "查看", "装备和对接点", "已方计划", "情报")
+
+
+def _au_queue_full(items, adb=None):
+    """底部队列状态判定满载：读到『2/2』这类 a/a（a>=2）或『队列已满』即为满。
+
+    实机教训：底部两条倒计时中常有一条被 OCR 读成 `881510` 之类无法解析的数字，
+    只看 `_au_queue_times()` 的长度会漏判满载 → 误进补位循环、反复开合面板。
+    """
+    texts = [str(t).strip() for _, _, t, _ in items or []]
+    if any(("队列已满" in t) or ("已达上限" in t) or ("队列满" in t) for t in texts):
+        return True
+    bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_BOTTOM_Y
+    for _, cy, t, sc in items or []:
+        if cy <= bottom or sc < 0.4:
+            continue
+        s = str(t).replace(" ", "")
+        m = re.fullmatch(r"(\d+)/(\d+)", s)
+        if m and m.group(1) == m.group(2) and int(m.group(1)) >= 2:
+            return True
+    return False
 
 
 def _au_queue_times(items, adb=None):
@@ -2126,9 +2166,16 @@ def _au_in_building_detail(items):
 
 
 def _au_on_base_build(items):
-    """是否在基地建设页（底部有『基地建设』导航，且不在建筑详情面板里）。"""
+    """是否在基地建设页：必须同时看到『基地建设』和基地页左下角『返回地图』。
+
+    2026-11-22 实机 bug：星图主界面里有一处提示文字「基地建设-舰队编组」，
+    旧逻辑只要出现"基地建设"就认为已在基地页，于是永远不会导航进去，
+    底部只有『对接信息 / 视野收集』导航，补位环节一直空转、从不升级。
+    """
     texts = [t for _, _, t, _ in items]
-    return any("基地建设" in t for t in texts) and not _au_in_building_detail(items)
+    return (any("基地建设" in t for t in texts)
+            and any("返回地图" in t for t in texts)
+            and not _au_in_building_detail(items))
 
 
 def _au_select_open_target(items, adb, target=None, locked=None):
@@ -2138,25 +2185,34 @@ def _au_select_open_target(items, adb, target=None, locked=None):
     → 否则最左的倒计时文字兜底。命中目标/候选名若落在 locked 名单内则跳过（保护保级建筑）。
     不含任何点击，便于单测。"""
     bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H)
+    bx1, by1, bx2, by2 = scale_box(adb, _AU_QUEUE_BAR_BOX)
     _locked = [str(x).strip() for x in (locked or []) if str(x).strip()]
-    # 底栏里可能出现的非建筑名文字（标签/状态/资源），不应被当作可点的建筑条目
+    # 底栏里可能出现的非建筑名文字（标签/状态/资源/导航），不应被当作可点的建筑条目
     _NON_NAME = ("建造队列", "资源", "全部", "队列", "金属", "原料", "核燃料",
-                 "建造中", "升级中", "进行中", "使用中", "已暂停", "已满", "暂停")
+                 "建造中", "升级中", "进行中", "使用中", "已暂停", "已满", "暂停") + _AU_NAV_WORDS
     def _locked_hit(name):
         return any(k in name for k in _locked)
     name_items, time_items = [], []
+    out_names, out_times = [], []          # 队列条区域外的候选，仅作兜底（导航词已排除）
     for cx, cy, t, sc in items:
         if cy <= bottom or sc < 0.4:
             continue
         ts = t.strip()
         if not ts:
             continue
+        in_bar = (bx1 <= cx <= bx2 and by1 <= cy <= by2)
         if parse_seconds(ts):                       # 倒计时文字（如 34:30:00）
-            time_items.append((cx, cy, ts))
+            (time_items if in_bar else out_times).append((cx, cy, ts))
         elif re.search(r"[一-鿿]", ts) and ts not in _NON_NAME and len(ts) >= 2:
             if _locked_hit(ts):
                 continue                            # 锁定名单内的建筑名直接跳过
-            name_items.append((cx, cy, ts))
+            (name_items if in_bar else out_names).append((cx, cy, ts))
+    # 优先用队列条区域内的条目；区域外只作兜底（旧设备/异形布局）。
+    # 实机 bug：左侧「返回地图」在 y 阈值之下，曾因取最左中文名而被当成建筑点掉。
+    if not name_items:
+        name_items = out_names
+    if not time_items:
+        time_items = out_times
     if target:
         for cx, cy, t in name_items:
             if target in t:
@@ -2196,11 +2252,11 @@ def _au_open_target(adb, items):
         adb.tap(sel[0], sel[1])
         time.sleep(2.5)
         return True
-    # 兜底：底栏左下固定坐标（底部区域，远离右上角直播挂件，避免陷入死循环）
-    log("未读到队列项，兜底点队列条左下区域", "warn")
-    adb.tap(int(adb.w * 0.18), int(adb.h * 0.93))
-    time.sleep(2.5)
-    return True
+    # 读不到可点建筑时不再盲点左下固定坐标：实机证明那个位置在展开视图下是
+    # 「对接信息 / 视野收集」导航，点了会在基地页两种视图间来回切换、永远补不了位。
+    # 返回 False 让主循环走「读不到队列 → 稍后重试 / 熔断」的安全路径。
+    log("底栏未读到可点建筑，跳过本轮补位（不盲点导航区）", "warn")
+    return False
 
 
 def _au_skip_reached(adb, items):
@@ -2332,14 +2388,22 @@ def cmd_autoup(adb, qq):
                         time.sleep(2)
                         continue
 
-                # 1) 底部建造队列状态栏读倒计时（y>900），判断队列是否满载
+                # 1) 底部建造队列状态栏读倒计时（y>900），判断队列是否满载。
+                #    倒计时常被 OCR 误读（如 881510），所以同时看队列状态「2/2」。
                 qtimes = _au_queue_times(items, adb)
-                if len(qtimes) >= 2:
+                full = _au_queue_full(items, adb)
+                if len(qtimes) >= 2 or full:
                     globals()["_AU_FULL_STREAK"] = 0
                     globals()["_AU_NOREAD_STREAK"] = 0
-                    wait = min(qtimes) + 45
-                    log(f"队列满载 2/2，最近到期 {fmt_duration(min(qtimes))}，等待 {fmt_duration(wait)}", "ok")
-                    qq.push("long_upgrade", f"队列满载，{fmt_duration(min(qtimes))} 后到期补位")
+                    if qtimes:
+                        near = fmt_duration(min(qtimes))
+                        wait = min(qtimes) + 45
+                    else:
+                        near = "倒计时未读到"
+                        wait = 600
+                    why = "队列状态2/2" if full else "两条倒计时"
+                    log(f"队列满载（{why}），最近到期 {near}，等待 {fmt_duration(wait)}", "ok")
+                    qq.push("long_upgrade", f"队列满载，{near} 后到期补位")
                     time.sleep(wait)
                     fails = 0
                     progress = True
@@ -2403,29 +2467,34 @@ def cmd_autoup(adb, qq):
                     fails = 0
                     continue
 
-                # 3) 其它页：导航回基地
-                pos = _au_find(items, "基地建设")
-                if pos and pos[1] > 700:
+                # 3) 其它页：导航回基地。
+                #    必须限定底部导航区：星图中部有提示文字「基地建设-舰队编组」，
+                #    旧 _au_find("基地") 会先命中它（y=596），因 y 不够低又不点，
+                #    最终每次都落到「页面未识别」，从不进基地页（2026-11-22 实机 bug）。
+                pos = _au_bottom_nav(items, adb, "基地建设")
+                if pos:
                     log("进入基地建设页", "step")
                     adb.tap(*pos)
                     time.sleep(2.5)
                     continue
-                pos = _au_find(items, "基地")
-                if pos and pos[1] > adb.h * 0.83:      # 底部导航区（900/1080），按分辨率换算
+                pos = _au_bottom_nav(items, adb, "基地")
+                if pos:
                     log("主界面 → 进入基地", "step")
                     adb.tap(*pos)
                     time.sleep(2.5)
                     continue
 
-                # 4) 页面未识别 → 返回键退一层再试（护栏会拦截退出框）
+                # 4) 页面未识别 → 绝不按系统返回键（keyevent 4）。
+                # 2026-11-22 实机 P0 bug：按返回键会弹「确定退出游戏」，护栏点取消后
+                # 又回到未识别页面，形成「未识别→返回键→退出框→取消」无限循环，从不升级。
                 fails += 1
-                log(f"页面未识别（{fails}/5），按返回键", "warn")
-                adb.run("shell", "input", "keyevent", "4")
-                time.sleep(2)
+                log(f"页面未识别（{fails}/5），不按返回键，等待下一轮", "warn")
                 if fails >= 5:
                     qq.push("lost", "连续 5 次未识别页面，请检查游戏状态", force=True)
                     fails = 0
-                    time.sleep(600)
+                    time.sleep(180)
+                else:
+                    time.sleep(20)
 
             except KeyboardInterrupt:
                 raise
