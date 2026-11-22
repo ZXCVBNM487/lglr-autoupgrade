@@ -172,6 +172,76 @@ def daily_log_path(log_dir, cmd, day=None):
     return os.path.join(log_dir, f"{day}_{cmd}.log")
 
 
+# ===== 在线设备列表（GUI 直接调 adb，不 import 主脚本，保证秒开）=====
+DEVICE_AUTO_LABEL = "（自动选择第一个在线设备）"
+
+
+def parse_adb_devices(text):
+    """从 `adb devices` 输出里取 status=device 的序列号，忽略 offline / unauthorized。"""
+    out = []
+    for line in (text or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            out.append(parts[0])
+    return out
+
+
+def _adb_run(adb_path, args, timeout=6):
+    r = subprocess.run([adb_path] + list(args), capture_output=True,
+                       timeout=timeout, creationflags=CREATE_NO_WINDOW)
+    return r.stdout.decode("utf-8", "replace")
+
+
+def _device_adb_path(config=None, adb_path=None):
+    if adb_path:
+        return adb_path
+    cfg = config if isinstance(config, dict) else load_cfg()
+    try:
+        from adb_locator import find_adb
+        return find_adb(cfg)
+    except Exception:
+        return None
+
+
+def list_online_devices(config=None, adb_path=None, timeout=8):
+    """返回 (设备列表, 错误信息)。设备元素：(serial, 分辨率, 类型标签)。"""
+    path = _device_adb_path(config, adb_path)
+    if not path or not os.path.isfile(path):
+        return [], "找不到 adb.exe（可在 config.json 里填 adb_path）"
+    try:
+        out = _adb_run(path, ["devices"], timeout)
+    except Exception as e:
+        return [], f"adb devices 失败：{e}"
+    rows = []
+    for serial in parse_adb_devices(out):
+        try:
+            size = _adb_run(path, ["-s", serial, "shell", "wm", "size"], 5)
+            m = re.search(r"(\d+)x(\d+)", size)
+            res = f"{max(int(m.group(1)), int(m.group(2)))}x{min(int(m.group(1)), int(m.group(2)))}" if m else "分辨率未知"
+        except Exception:
+            res = "分辨率未知"
+        kind = "模拟器" if (("127.0.0.1" in serial) or serial.startswith("emulator")) else "真机"
+        rows.append((serial, res, kind))
+    return rows, ""
+
+
+def test_device_connection(serial, config=None, adb_path=None):
+    """真正测一次全屏截图（挂机最依赖的能力）。返回 (是否成功, 说明文字)。"""
+    path = _device_adb_path(config, adb_path)
+    if not path or not serial:
+        return False, "没有可用 adb 或设备序列号"
+    try:
+        r = subprocess.run([path, "-s", serial, "exec-out", "screencap", "-p"],
+                           capture_output=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return False, "截图超时（20 秒）"
+    except Exception as e:
+        return False, f"截图失败：{e}"
+    if r.stdout[:4] == b"\x89PNG":
+        return True, f"连接正常，截图 {len(r.stdout) // 1024} KB"
+    return False, "未拿到 PNG 截图（设备可能锁屏或掉线）"
+
+
 def load_cfg():
     """只读 json，不 import 主脚本（保证 GUI 秒开）。"""
     try:
@@ -329,35 +399,72 @@ def run_gui():
     inner = tk.Frame(devbox, bg=BG_PANEL)
     inner.pack(fill="x", padx=12, pady=10)
 
-    tk.Label(inner, text="设备模式", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
-    mode_var = tk.StringVar(value="auto")
-    mode_cb = ttk.Combobox(inner, textvariable=mode_var, width=11, state="readonly",
-                           values=["auto", "phone", "emulator", "serial"], font=FONT_SM)
-    mode_cb.pack(side="left", padx=(6, 14))
+    tk.Label(inner, text="设备", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    dev_var = tk.StringVar(value=DEVICE_AUTO_LABEL)
+    dev_map = {DEVICE_AUTO_LABEL: ""}
+    dev_cb = ttk.Combobox(inner, textvariable=dev_var, width=40, state="readonly",
+                          values=[DEVICE_AUTO_LABEL], font=FONT_SM)
+    dev_cb.pack(side="left", padx=(6, 10))
+    dev_info = tk.Label(inner, text="点「刷新」读取在线设备", bg=BG_PANEL, fg=FG_DIM, font=FONT_SM)
+    dev_info.pack(side="left")
 
-    tk.Label(inner, text="序列号", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
-    serial_var = tk.StringVar(value="")
-    tk.Entry(inner, textvariable=serial_var, width=24, bg=BG_LOG, fg=FG,
-             insertbackground=FG, relief="flat", font=FONT_SM).pack(side="left", padx=(6, 14))
-
-    def _save_device():
+    def _save_serial(serial, label=None):
         cfg = load_cfg()
-        if not cfg:
-            messagebox.showwarning("提示", "没有找到 config.json，请先运行一次环境自检。")
-            return
-        cfg.setdefault("device", {})
-        cfg["device"]["mode"] = mode_var.get()
-        cfg["device"]["serial"] = serial_var.get().strip()
-        if save_cfg(cfg):
-            append_log(f"[配置] 设备模式已保存为 {mode_var.get()}"
-                       f"{(' / ' + serial_var.get().strip()) if serial_var.get().strip() else ''}\n", "ok")
-        else:
+        if not isinstance(cfg.get("device"), dict):
+            cfg["device"] = {}
+        cfg["device"].pop("mode", None)          # 顺手迁移旧配置
+        cfg["device"]["serial"] = serial
+        if not save_cfg(cfg):
             messagebox.showerror("失败", "config.json 写入失败，可能被占用。")
+            return False
+        append_log(f"[配置] 设备已设为 {label or serial or '自动选择'}\n", "ok")
+        return True
 
-    tk.Button(inner, text="保存设备设置", command=_save_device,
+    def _refresh_devices(*_):
+        rows, err = list_online_devices()
+        if err:
+            dev_info.configure(text=err)
+            append_log(f"[设备] 刷新失败：{err}\n", "warn")
+            return
+        dev_map.clear()
+        dev_map[DEVICE_AUTO_LABEL] = ""
+        labels = [DEVICE_AUTO_LABEL]
+        for serial, res, kind in rows:
+            label = f"{serial} · {res} · {kind}"
+            dev_map[label] = serial
+            labels.append(label)
+        dev_cb["values"] = labels
+        cur = str((load_cfg().get("device", {}) or {}).get("serial") or "").strip()
+        dev_var.set(next((l for l, s in dev_map.items() if s == cur), DEVICE_AUTO_LABEL))
+        dev_info.configure(text=f"在线 {len(rows)} 个通道" if rows else "未检测到在线设备")
+        append_log(f"[设备] 刷新完成，在线 {len(rows)} 个通道\n", "info")
+
+    def _on_device_change(*_):
+        label = dev_var.get()
+        if _save_serial(dev_map.get(label, ""), label):
+            dev_info.configure(text=f"已选：{label}")
+
+    def _test_device():
+        serial = dev_map.get(dev_var.get(), "")
+        if not serial:
+            rows, _ = list_online_devices()
+            serial = rows[0][0] if rows else ""
+        if not serial:
+            messagebox.showwarning("提示", "没有在线设备，请先点「刷新」。")
+            return
+        dev_info.configure(text=f"正在测试 {serial} …")
+        root.update_idletasks()
+        ok, msg = test_device_connection(serial)
+        dev_info.configure(text=f"{serial}：{msg}")
+        (messagebox.showinfo if ok else messagebox.showwarning)("测试连接", f"{serial}\n{msg}")
+
+    dev_cb.bind("<<ComboboxSelected>>", _on_device_change)
+    tk.Button(inner, text="测试连接", command=_test_device,
               bg=BG_LOG, fg=ACCENT, activebackground=BG_LOG, activeforeground=ACCENT,
-              relief="flat", font=FONT_SM, padx=12, pady=3, cursor="hand2").pack(side="left")
-
+              relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right")
+    tk.Button(inner, text="刷新", command=_refresh_devices,
+              bg=BG_LOG, fg=FG_DIM, activebackground=BG_LOG, activeforeground=FG,
+              relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right", padx=(0, 6))
     tk.Button(inner, text="打开目录", command=lambda: _open_dir(BASE_DIR),
               bg=BG_LOG, fg=FG_DIM, activebackground=BG_LOG, activeforeground=FG,
               relief="flat", font=FONT_SM, padx=10, pady=3, cursor="hand2").pack(side="right")
@@ -622,8 +729,8 @@ def run_gui():
     def refresh_device_from_cfg():
         cfg = load_cfg()
         d = cfg.get("device", {}) if isinstance(cfg, dict) else {}
-        mode_var.set(d.get("mode", "auto"))
-        serial_var.set(d.get("serial", ""))
+        cur = str(d.get("serial") or "").strip()
+        dev_var.set(next((l for l, s in dev_map.items() if s == cur), DEVICE_AUTO_LABEL))
 
     # ==================== 任务执行 ====================
     def stop_task():
@@ -781,8 +888,7 @@ def run_gui():
     cfg = load_cfg()
     if cfg:
         d = cfg.get("device", {})
-        append_log(f"已加载配置：设备模式 = {d.get('mode', 'auto')}"
-                   f"{(' / ' + d.get('serial')) if d.get('serial') else ''}"
+        append_log(f"已加载配置：设备 = {d.get('serial') or '自动选择'}"
                    f" · 目标建筑 = {cfg.get('au_target_building', '未设置')}\n", "dim")
         refresh_device_from_cfg()
     else:
@@ -797,6 +903,7 @@ def run_gui():
             append_log(f"（自测模式：启动后自动执行 {_cmd}）\n", "warn")
             root.after(1000, lambda: start_cmd(_cmd, "自动测试执行", False))
 
+    root.after(400, _refresh_devices)   # 窗口先显示，再查在线设备（避免拖慢启动）
     root.after(perf_state["poll_ms"], pump)
     root.after(600, load_preview)   # 目录里有上次的截图就先显示出来
     root.mainloop()

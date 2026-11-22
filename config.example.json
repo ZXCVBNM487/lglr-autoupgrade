@@ -1,7 +1,6 @@
 {
   "adb_path": "",
   "device": {
-    "mode": "auto",
     "serial": ""
   },
   "performance": {

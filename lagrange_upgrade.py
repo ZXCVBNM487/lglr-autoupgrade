@@ -98,13 +98,10 @@ def banner():
 DEFAULT_CONFIG = {
     "adb_path": "",                            # 留空自动寻找雷电/MuMu/夜神 adb
 
-    # 设备选择：模拟器与真机都支持，同时连接时按这里决定用哪台
-    #   auto     = 自动（有真机优先用真机，只有模拟器就用模拟器）——默认
-    #   phone    = 只用真机（USB 连接的手机）
-    #   emulator = 只用模拟器（雷电/MuMu/夜神/逍遥/蓝叠/腾讯手游助手等）
-    #   serial   = 只用 device.serial 指定的序列号
+    # 设备：留空 = 自动挑第一个在线通道；填序列号（127.0.0.1:5555 / 真机序列号）
+    # 则只连这一台。旧版 mode(auto/phone/emulator/serial) 已移除，
+    # 改由测试仪「设备」下拉直接列出在线设备，选中即写回这里。
     "device": {
-        "mode": "auto",
         "serial": ""
     },
 
@@ -1000,49 +997,46 @@ def scale_box(adb, box):
 
 
 def _is_emulator_serial(dev):
-    """模拟器的 adb 序列号特征：127.0.0.1:端口 / emulator-5554 / localhost。"""
+    """模拟器通道的 adb 序列号特征（现在只用于界面显示标签，不参与设备选择）。"""
     d = (dev or "").lower()
     return ("127.0.0.1" in d) or ("localhost" in d) or d.startswith("emulator")
 
 
+def select_device(devs, want=""):
+    """从在线设备列表里挑一台。返回 (serial, why, error)。
+
+    want 留空 = 自动挑第一个在线通道；指定了但不在线 = 报错且绝不回退到别的设备，
+    避免指定设备掉线后误连到另一台机子继续挂机。纯函数，便于无设备单测。
+    """
+    online = [str(d).strip() for d in (devs or []) if str(d).strip()]
+    want = str(want or "").strip()
+    if not online:
+        return None, "", "没有在线设备（请确认模拟器已启动 / 手机已开 USB 调试）"
+    if not want:
+        return online[0], "自动选择（第一个在线通道）", ""
+    if want not in online:
+        return None, "", (f"指定的设备不在线：{want}\n"
+                          f"  当前在线：{', '.join(online)}")
+    return want, "指定设备", ""
+
+
 def _pick_device_by_pref(adb):
-    """按 config.device.mode 选择设备，让模拟器和真机都能用。
-    返回 (是否切换过, 说明文字)。真机序列号通常是类似 ABCDEF123456 的硬件号。"""
+    """按 config.device.serial 选设备。留空自动；指定但离线则明确退出，不误连。"""
     dcfg = CONFIG.get("device", {}) or {}
-    mode = str(dcfg.get("mode", "auto")).lower().strip()
-    want_serial = str(dcfg.get("serial", "")).strip()
-
+    want = str(dcfg.get("serial", "")).strip()
     devs = adb._list_devices()
-    if not devs:
-        print(f"{C.WARN}▸ 未检测到任何设备{C.R}  {C.DIM}请确认模拟器已启动 / 手机已开 USB 调试{C.R}")
+    target, why, err = select_device(devs, want)
+    if err:
+        print(f"{C.ERR}▸ {err}{C.R}")
+        if want:
+            print(f"{C.DIM}  请在测试仪「设备」下拉里刷新后重新选择，或把 device.serial 清空改为自动{C.R}")
+            sys.exit(2)          # 指定设备不在线：绝不拿别的设备凑合
         return False, "无设备"
-
-    phones = [d for d in devs if not _is_emulator_serial(d)]
-    emus = [d for d in devs if _is_emulator_serial(d)]
-
-    if mode == "serial" and want_serial:
-        target = want_serial if want_serial in devs else None
-        why = f"指定序列号 {want_serial}"
-    elif mode == "phone":
-        target = phones[0] if phones else None
-        why = "只选真机"
-    elif mode == "emulator":
-        target = emus[0] if emus else None
-        why = "只选模拟器"
-    else:                                   # auto：有真机先用真机，否则用模拟器
-        target = phones[0] if phones else devs[0]
-        why = "自动选择"
-
-    # 指定了但没找到 → 退回当前设备并告警，避免直接退出
-    if target is None:
-        print(f"{C.WARN}▸ {why}：未找到匹配设备{C.R}")
-        print(f"{C.DIM}  当前连接：{', '.join(devs)}  已连接 {len(phones)} 台真机 / {len(emus)} 台模拟器{C.R}")
-        return False, f"{why}未命中"
 
     changed = (adb.device != target)
     if changed:
         adb.set_device(target)
-    kind = "真机" if not _is_emulator_serial(target) else "模拟器"
+    kind = "模拟器" if _is_emulator_serial(target) else "真机"
     if changed:
         print(f"{C.ACCENT}▸ 设备{C.R}     {C.HL}{adb.device}{C.R}  "
               f"{C.DIM}{adb.w}x{adb.h} · {kind} · {why}{C.R}")
@@ -1995,7 +1989,7 @@ def cmd_autoup(adb, qq):
     """一键升级自动循环入口：倒计时驱动，队列先到先补。
     真实 UI 流程：基地建设页底部队列栏读倒计时 → 满载则等待 → 有空位则打开目标建筑详情
     → 点『升至满级/连续升级设置』→ 处理等级选择/资源不足/队列已满。"""
-    # 模拟器 / 真机都支持：按 config.device.mode 选设备（auto 默认有真机优先）
+    # 模拟器 / 真机都支持：按 config.device.serial 选设备（留空自动挑在线通道）
     _pick_device_by_pref(adb)
 
     qq.push("start", "一键升级自动循环已启动（真机/模拟器通用）")
@@ -2737,7 +2731,7 @@ def main():
 
     banner()
     adb = Adb()
-    # 统一按 config.device.mode 选设备：模拟器与真机都支持，所有命令用同一台
+    # 统一按 config.device.serial 选设备：所有命令都用同一台
     _pick_device_by_pref(adb)
 
     # 单实例锁：自动脚本/日常等会持续驱动设备，禁止第二个实例抢占同一 ADB 信道

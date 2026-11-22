@@ -698,5 +698,67 @@ class TestRobustness(unittest.TestCase):
             self.assertTrue(p1.endswith("20261122_autoup.log"))
 
 
+class TestDeviceSelection(unittest.TestCase):
+    """设备模式重构：serial-only 选择逻辑与 adb devices 解析（纯逻辑，无需设备）。"""
+
+    def test_auto_picks_first_online(self):
+        devs = ["127.0.0.1:16384", "127.0.0.1:5555", "127.0.0.1:7555"]
+        target, why, err = L.select_device(devs)
+        self.assertEqual(target, devs[0])
+        self.assertEqual(err, "")
+        self.assertIn("自动", why)
+
+    def test_serial_selected_when_online(self):
+        devs = ["127.0.0.1:16384", "127.0.0.1:5555"]
+        target, why, err = L.select_device(devs, "127.0.0.1:5555")
+        self.assertEqual(target, "127.0.0.1:5555")
+        self.assertEqual(err, "")
+        self.assertEqual(why, "指定设备")
+
+    def test_offline_serial_never_falls_back(self):
+        devs = ["127.0.0.1:16384", "127.0.0.1:5555"]
+        target, why, err = L.select_device(devs, "ABCDEF123456")
+        self.assertIsNone(target)                 # 绝不回退到别的在线设备
+        self.assertIn("不在线", err)
+        self.assertIn("ABCDEF123456", err)
+        self.assertIn("127.0.0.1:16384", err)     # 错误信息里列出在线设备
+
+    def test_no_devices(self):
+        target, _, err = L.select_device([], "")
+        self.assertIsNone(target)
+        self.assertIn("没有在线设备", err)
+        target2, _, err2 = L.select_device(None, "127.0.0.1:5555")
+        self.assertIsNone(target2)
+        self.assertTrue(err2)
+
+    def test_whitespace_and_blank_entries(self):
+        devs = ["", "  ", "127.0.0.1:5555", "127.0.0.1:7555"]
+        self.assertEqual(L.select_device(devs)[0], "127.0.0.1:5555")
+        self.assertEqual(L.select_device(devs, "  127.0.0.1:7555  ")[0],
+                         "127.0.0.1:7555")
+
+    def test_default_config_device_is_serial_only(self):
+        dev = L.DEFAULT_CONFIG["device"]
+        self.assertNotIn("mode", dev)
+        self.assertIn("serial", dev)
+        self.assertEqual(dev["serial"], "")
+
+    def test_parse_adb_devices_ignores_offline(self):
+        import tester
+        text = ("List of devices attached\n"
+                "127.0.0.1:16384\tdevice\n"
+                "emulator-5554\toffline\n"
+                "ABCDEF123456\tunauthorized\n"
+                "127.0.0.1:5555\tdevice\n\n")
+        self.assertEqual(tester.parse_adb_devices(text),
+                         ["127.0.0.1:16384", "127.0.0.1:5555"])
+        self.assertEqual(tester.parse_adb_devices(""), [])
+        self.assertEqual(tester.parse_adb_devices("List of devices attached\n"), [])
+
+    def test_device_auto_label(self):
+        import tester
+        self.assertIn("自动", tester.DEVICE_AUTO_LABEL)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
