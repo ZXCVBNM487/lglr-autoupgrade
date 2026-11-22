@@ -1432,22 +1432,54 @@ def load_points():
         return {}
 
 
+def point_design_xy(point, cfg=None):
+    """把点位记录换算成 2310x1080 设计坐标。
+
+    points.json 的「坐标」是校准设备上的实机像素，「设计坐标」才是 scale_box 的输入。
+    旧记录只有「坐标」时，按 points.json 的「分辨率」基准换算回来，绝不把实机像素
+    当成设计坐标直接缩放（那会让 1600x900 设备上的点击点偏到左上角）。
+    """
+    if not isinstance(point, dict):
+        return None
+    d = point.get("设计坐标")
+    if isinstance(d, (list, tuple)) and len(d) >= 2 and d[0] is not None and d[1] is not None:
+        return int(d[0]), int(d[1])
+    xy = point.get("坐标") or point.get("fallback")
+    if not (isinstance(xy, (list, tuple)) and len(xy) >= 2):
+        return None
+    cfg = cfg if isinstance(cfg, dict) else load_points()
+    base = cfg.get("分辨率") or (1600, 900)
+    bw, bh = int(base[0]), int(base[1])
+    if bw <= 0 or bh <= 0:
+        return None
+    return (round(int(xy[0]) * DESIGN_W / bw),
+            round(int(xy[1]) * DESIGN_H / bh))
+
+
+def point_expect_texts(point):
+    """读取点位的目标文字：支持「验证文字」数组和旧记录里斜杠分隔的「目标文字」。"""
+    expect = point.get("验证文字") or point.get("verify") or point.get("目标文字") or []
+    if isinstance(expect, str):
+        expect = [part.strip() for part in re.split(r"[/、|]", expect) if part.strip()]
+    return [str(k).strip() for k in expect if str(k).strip()]
+
+
 def point_double_check(adb, point, settle=4.0):
     """坐标定位 + 文字识别双重校验，返回 (是否成功, 界面文字, 说明)。
 
-    流程：scale_box 换算坐标 → ADB 点击 → 等待转场 → 截图 OCR →
-    目标文字是否出现。校验失败不盲目重复点击，交给上层按容错规则处理。
+    流程：设计坐标 → scale_box 换算到当前分辨率 → ADB 点击 → 等待转场 →
+    截图 OCR → 目标文字是否出现。校验失败不盲目重复点击，交给上层按容错规则处理。
     """
     cfg = load_points()
     if not isinstance(point, dict):
         return False, "", "点位配置无效"
-    x, y = point.get("坐标") or (point.get("fallback") or (0, 0))
-    x, y = scale_box(adb, (int(x), int(y), 0, 0))[:2]
-    expect = point.get("验证文字") or point.get("verify") or []
-    if isinstance(expect, str):
-        expect = [expect]
+    design = point_design_xy(point, cfg)
+    if not design:
+        return False, "", "点位坐标为空"
+    x, y = scale_box(adb, (design[0], design[1], 0, 0))[:2]
     if not x or not y:
         return False, "", "点位坐标为空"
+    expect = point_expect_texts(point)
     adb.tap(x, y)
     time.sleep(settle)
     img = adb.screenshot()
@@ -1541,22 +1573,54 @@ def cmd_icons(adb):
 
 
 def cmd_points():
-    """点位配置自检：打印 points.json 的双入口、标注点与资源文件是否齐全。"""
+    """点位配置自检：逐项核对设计坐标/实机坐标是否一致、验证文字与资源是否齐全。"""
     d = load_points()
     if not d:
         print(f"{C.ERR}points.json 缺失或损坏{C.R}")
         return
-    print(f"{C.ACCENT}全量点位配置自检{C.R}  设备 {d.get('设备', '?')} / {d.get('分辨率', '?')}")
-    for key in ("task_panel", "activity"):
-        p = (d.get("关键入口") or {}).get(key) or {}
-        print(f"  {key:12} {p.get('名称', '?')} 坐标{p.get('坐标')} 验证文字{p.get('验证文字')}")
+    base = d.get("分辨率") or (1600, 900)
+    bw, bh = int(base[0]), int(base[1])
+    print(f"{C.ACCENT}全量点位配置自检{C.R}  设备 {d.get('设备', '?')} / "
+          f"校准分辨率 {bw}x{bh} / 设计基准 {DESIGN_W}x{DESIGN_H}")
+    fails = []
+
+    def check_xy(label, p):
+        xy = p.get("坐标")
+        design = point_design_xy(p, d)
+        if not design:
+            fails.append(f"{label} 坐标为空")
+            print(f"  {label:22} {C.ERR}FAIL 坐标为空{C.R}")
+            return
+        back = (round(design[0] * bw / DESIGN_W), round(design[1] * bh / DESIGN_H))
+        ok = isinstance(xy, (list, tuple)) and len(xy) >= 2 and \
+             abs(int(xy[0]) - back[0]) <= 2 and abs(int(xy[1]) - back[1]) <= 2
+        tag = f"{C.OK}OK{C.R}" if ok else f"{C.ERR}FAIL 换算不符（应为 {back}）{C.R}"
+        if not ok:
+            fails.append(f"{label} 设计/实机坐标不一致")
+        print(f"  {label:22} 实机{str(xy):12} 设计{str(design):12} {tag}")
+
+    print(f"{C.DIM}-- 关键入口 --{C.R}")
+    for key, p in (d.get("关键入口") or {}).items():
+        check_xy(key, p)
+        expect = point_expect_texts(p)
+        if not expect:
+            print(f"  {key:22} {C.WARN}未登记验证文字{C.R}")
+        else:
+            print(f"  {'':22} 验证文字 {'/'.join(expect)}")
     rows = d.get("点位") or []
-    print(f"  标注点位 {len(rows)} 个：活动标点 "
-          f"{sum(1 for p in rows if p.get('分类','').startswith('活动'))} / 有效 "
-          f"{sum(1 for p in rows if p.get('分类') == '有效点击点')} / 异常 "
-          f"{sum(1 for p in rows if p.get('分类','').startswith('异常'))}")
+    print(f"{C.DIM}-- 标注点位 {len(rows)} 个 --{C.R}")
+    for p in rows:
+        check_xy(f"#{p.get('序号', '?')} {p.get('名称', '?')}", p)
+    print(f"{C.DIM}-- 资源文件 --{C.R}")
     for k, rel in (d.get("资源文件") or {}).items():
-        print(f"  {k:12} {'OK' if os.path.isfile(os.path.join(app_dir(), rel)) else '缺失'}  {rel}")
+        ok = os.path.isfile(os.path.join(app_dir(), rel))
+        if not ok:
+            fails.append(f"资源缺失 {rel}")
+        print(f"  {k:12} {C.OK if ok else C.ERR}{'OK' if ok else '缺失'}{C.R}  {rel}")
+    if fails:
+        print(f"{C.ERR}自检失败 {len(fails)} 项：" + "；".join(fails) + C.R)
+    else:
+        print(f"{C.OK}自检通过：坐标换算 / 验证文字 / 资源文件全部一致{C.R}")
 
 
 def cmd_scan(adb):
@@ -1581,7 +1645,8 @@ def cmd_scan(adb):
     out = os.path.join(app_dir(), "scan_标注.png")
     annotated.save(out)
     log(f"标注图已保存: {out}", "ok")
-    log("坐标按 2310x1080 设计基准记录；脚本会用 scale_box 自动换算到实际分辨率")
+    log(f"以上坐标为当前设备实机像素（{adb.w}x{adb.h}）；写入 points.json 时请换算为 "
+        f"{DESIGN_W}x{DESIGN_H} 设计基准，运行时由 scale_box 自动换算回来")
 
 
 def cmd_times(adb):
