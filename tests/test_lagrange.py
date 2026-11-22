@@ -755,9 +755,124 @@ class TestDeviceSelection(unittest.TestCase):
         self.assertEqual(tester.parse_adb_devices(""), [])
         self.assertEqual(tester.parse_adb_devices("List of devices attached\n"), [])
 
-    def test_device_auto_label(self):
+    def test_device_kind_constants(self):
         import tester
-        self.assertIn("自动", tester.DEVICE_AUTO_LABEL)
+        self.assertEqual(tester.DEVICE_KINDS, ("真机", "模拟器"))
+        self.assertIn("不使用", tester.DEVICE_NONE_LABEL)
+
+
+class TestDeviceClassification(unittest.TestCase):
+    """真机 / 模拟器分类扫描：全状态解析、归类、选择与设备信息格式化。"""
+
+    SAMPLE = ("List of devices attached\n"
+              "127.0.0.1:16384  device product:ali model:PGBM10 device:ali transport_id:1\n"
+              "127.0.0.1:5555   offline transport_id:2\n"
+              "5ENDU19313001205 unauthorized transport_id:3\n"
+              "emulator-5554    device product:sdk model:Pixel_5 transport_id:4\n"
+              "* daemon not running *\n")
+
+    def _rows(self):
+        import tester
+        return tester.parse_adb_device_rows(self.SAMPLE)
+
+    def test_parse_all_statuses(self):
+        import tester
+        rows = self._rows()
+        self.assertEqual(len(rows), 4)                    # daemon 提示行被忽略
+        self.assertEqual(rows[0]["status_cn"], "在线")
+        self.assertEqual(rows[1]["status_cn"], "离线")
+        self.assertEqual(rows[2]["status_cn"], "未授权")
+        self.assertEqual(rows[0]["model"], "PGBM10")
+        self.assertTrue(rows[0]["online"])
+        self.assertFalse(rows[1]["online"])
+        self.assertEqual(tester.parse_adb_devices(self.SAMPLE),
+                         ["127.0.0.1:16384", "emulator-5554"])
+
+    def test_classify_serial(self):
+        import tester as T
+        for s in ("127.0.0.1:16384", "localhost:5555", "emulator-5554", "127.0.0.2:7555"):
+            self.assertEqual(T.classify_device_serial(s), T.DEVICE_KIND_EMU)
+        for s in ("5ENDU19313001205", "ABCDEF123456", "0123456789ABCDEF"):
+            self.assertEqual(T.classify_device_serial(s), T.DEVICE_KIND_PHONE)
+
+    def test_group_devices(self):
+        import tester as T
+        g = T.group_devices(self._rows())
+        self.assertEqual(set(g), {"真机", "模拟器"})
+        self.assertEqual(len(g["真机"]), 1)
+        self.assertEqual(len(g["模拟器"]), 3)
+        self.assertEqual(T.group_devices([]), {"真机": [], "模拟器": []})
+
+    def test_pick_by_kind_and_serial(self):
+        import tester as T
+        rows = self._rows()
+        self.assertEqual(T.pick_device(rows, kind=T.DEVICE_KIND_EMU)[0]["serial"],
+                         "127.0.0.1:16384")
+        self.assertEqual(T.pick_device(rows, serial="emulator-5554")[0]["kind"],
+                         T.DEVICE_KIND_EMU)
+        dev, err = T.pick_device(rows, kind=T.DEVICE_KIND_PHONE)
+        self.assertIsNone(dev)                            # 唯一真机未授权
+        self.assertIn("没有在线的真机设备", err)
+        dev2, err2 = T.pick_device(rows, serial="127.0.0.1:5555")
+        self.assertIsNone(dev2)                           # 离线设备不可选
+        self.assertIn("不在线", err2)
+        self.assertEqual(T.pick_device(rows)[0]["serial"], "127.0.0.1:16384")
+
+    def test_format_device_info_and_row(self):
+        import tester as T
+        d = self._rows()[0]
+        d["resolution"] = "1600x900"
+        info = T.format_device_info(d)
+        for kw in ("127.0.0.1:16384", "模拟器", "在线", "1600x900", "PGBM10"):
+            self.assertIn(kw, info)
+        self.assertIn("在线", T.format_device_row(d))
+        self.assertEqual(T.format_device_info(None), "未选择设备")
+
+    def test_scan_ignores_daemon_notice(self):
+        import tester as T
+        self.assertEqual(T.parse_adb_device_rows(
+            "List of devices attached\n* daemon started successfully *\n"), [])
+
+    def test_capture_shot_writes_png(self):
+        import tempfile
+        import tester as T
+        from unittest import mock
+        png = b"\x89PNG\r\n\x1a\n" + b"x" * 2048
+
+        class R:
+            stdout = png
+            stderr = b""
+
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "shot.png")
+            with mock.patch.object(T.subprocess, "run", return_value=R()), \
+                 mock.patch.object(T, "_device_adb_path", return_value="adb.exe"):
+                ok, msg, n = T.capture_device_shot("127.0.0.1:5555", out)
+            self.assertTrue(ok)
+            self.assertEqual(n, len(png))
+            self.assertIn("截图", msg)
+            self.assertEqual(open(out, "rb").read(), png)
+
+    def test_capture_shot_rejects_non_png(self):
+        import tester as T
+        from unittest import mock
+
+        class R:
+            stdout = b"error: no devices"
+            stderr = b""
+
+        with mock.patch.object(T.subprocess, "run", return_value=R()), \
+             mock.patch.object(T, "_device_adb_path", return_value="adb.exe"):
+            ok, msg, n = T.capture_device_shot("127.0.0.1:5555")
+        self.assertFalse(ok)
+        self.assertEqual(n, 0)
+        self.assertIn("PNG", msg)
+
+    def test_capture_shot_without_serial(self):
+        import tester as T
+        ok, msg, n = T.capture_device_shot("")
+        self.assertFalse(ok)
+        self.assertEqual(n, 0)
 
 
 if __name__ == "__main__":
