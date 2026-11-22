@@ -874,8 +874,11 @@ class TestIconEntries(unittest.TestCase):
             if c.get("fallback"):
                 self.assertEqual(len(c["fallback"]), 2)
         self.assertTrue(L.ICON_ONLY_ENTRIES["live_widget"]["forbidden"])
-        self.assertIsNone(L.ICON_ONLY_ENTRIES["activity_entry"]["fallback"],
-                          "活动入口未校准，绝不能再有盲点兜底坐标")
+        # 2026-11-22 实机确认活动入口 = 左上剪贴板图标，已有模板与坐标；
+        # 只禁止再出现旧的 (320,60) 盲点兜底。
+        act = L.ICON_ONLY_ENTRIES["activity_entry"]
+        self.assertEqual(act["fallback"], (217, 55))
+        self.assertEqual(act["template"], "icon_task.png")
 
     def test_forbidden_entry_never_located(self):
         import numpy as np
@@ -883,8 +886,12 @@ class TestIconEntries(unittest.TestCase):
         self.assertIsNone(L.find_icon_entry(_FakeAdb(), img, "live_widget"))
         self.assertFalse(L.tap_icon_entry(_FakeAdb(), "live_widget"))
 
-    def test_uncalibrated_entry_returns_none(self):
-        self.assertIsNone(L.find_icon_entry(_FakeAdb(), None, "activity_entry"))
+    def test_allow_fallback_false_returns_none(self):
+        # 模板未加载 / 无图且禁用兜底时应返回 None（校准前的严格模式）
+        self.assertIsNone(L.find_icon_entry(_FakeAdb(), None, "activity_entry",
+                                            allow_fallback=False))
+        self.assertIsNone(L.find_icon_entry(_FakeAdb(), None, "task_close",
+                                            allow_fallback=False))
 
     def test_config_override_supplies_fallback(self):
         from unittest import mock
@@ -928,6 +935,114 @@ class TestIconEntries(unittest.TestCase):
         x, y = hit[:2]
         self.assertAlmostEqual(x, 422 * 1600 / 2310, delta=1)
         self.assertAlmostEqual(y, 863 * 900 / 1080, delta=1)
+
+
+class TestNetworkAdbReconnect(unittest.TestCase):
+    """局域网 ADB 掉线自动重连（实机基线暴露的真实缺陷）。"""
+
+    def test_is_network_adb_addr(self):
+        self.assertTrue(L.is_network_adb_addr("192.168.100.17:5555"))
+        self.assertTrue(L.is_network_adb_addr("10.0.0.5:7555"))
+        self.assertFalse(L.is_network_adb_addr("127.0.0.1:16384"))
+        self.assertFalse(L.is_network_adb_addr("emulator-5554"))
+        self.assertFalse(L.is_network_adb_addr("ABCDEF123456"))
+        self.assertFalse(L.is_network_adb_addr(""))
+        self.assertFalse(L.is_network_adb_addr(None))
+
+    def test_reconnect_addrs_priority(self):
+        cfg = {"device": {"serial": "192.168.100.17:5555"}}
+        st = {"last_device": "192.168.1.9:5555"}
+        out = L.adb_reconnect_addrs(cfg, st, [16384, 7555])
+        self.assertEqual(out[:2], ["192.168.100.17:5555", "192.168.1.9:5555"])
+        self.assertEqual(out[2:], ["127.0.0.1:16384", "127.0.0.1:7555"])
+
+    def test_reconnect_addrs_dedup(self):
+        cfg = {"device": {"serial": "192.168.100.17:5555"}}
+        st = {"last_device": "192.168.100.17:5555"}
+        self.assertEqual(L.adb_reconnect_addrs(cfg, st, [5555]),
+                         ["192.168.100.17:5555", "127.0.0.1:5555"])
+
+    def test_localhost_serial_not_treated_as_network(self):
+        cfg = {"device": {"serial": "127.0.0.1:16384"}}
+        self.assertEqual(L.adb_reconnect_addrs(cfg, {}, [16384]),
+                         ["127.0.0.1:16384"])
+
+    def test_scan_connects_network_addr_first(self):
+        calls = []
+        adb = object.__new__(L.Adb)
+        adb.path = "adb.exe"
+        adb._port_open = lambda p, timeout=0.2: False
+        adb.list_devices = lambda: []
+        adb._net_addrs = ["192.168.100.17:5555"]
+
+        def raw(*args, **kw):
+            calls.append(args)
+            class R:
+                stdout = b""
+            return R()
+
+        adb.raw = raw
+        adb.scan_and_connect(budget=5)
+        self.assertEqual(calls[0], ("connect", "192.168.100.17:5555"))
+
+
+class TestTaskCloseTemplate(unittest.TestCase):
+    """任务面板关闭改为纯图标模板识别（原先只有写死坐标）。"""
+
+    def test_registry_has_template(self):
+        c = L.ICON_ONLY_ENTRIES["task_close"]
+        self.assertEqual(c["template"], "icon_task_close.png")
+        self.assertEqual(c["fallback"], L._TASK_CLOSE)
+        self.assertGreaterEqual(c["threshold"], 0.6)
+        self.assertFalse(c.get("forbidden", False))
+
+    def test_template_file_exists(self):
+        import os
+        p = os.path.join(os.path.dirname(L.__file__), "refs", "icon_task_close.png")
+        self.assertTrue(os.path.isfile(p))
+
+    def test_close_helper_exists(self):
+        self.assertTrue(callable(L._daily_tap_task_close))
+
+
+class TestActivityEntryCalibrated(unittest.TestCase):
+    """活动入口：2026-11-22 实机确认 = 左上剪贴板图标，已内置模板与坐标。"""
+
+    def test_registry_complete(self):
+        c = L.ICON_ONLY_ENTRIES["activity_entry"]
+        self.assertEqual(c["template"], "icon_task.png")
+        self.assertTrue(c["fallback"])
+        self.assertGreaterEqual(c["threshold"], 0.6)
+        self.assertIn("探险协议", c["verify"])
+        self.assertFalse(c.get("forbidden", False))
+
+    def test_fallback_available_without_image(self):
+        import sys as _s
+        _s.path.insert(0, r'E:\拉格朗日自动升级')
+        hit = L.find_icon_entry(_FakeAdb(1600, 900), None, "activity_entry")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[2], "fallback")
+        self.assertAlmostEqual(hit[0], 217 * 1600 / 2310, delta=1)
+        self.assertAlmostEqual(hit[1], 55 * 900 / 1080, delta=1)
+
+
+class TestActivitySidebarRegion(unittest.TestCase):
+    """活动侧栏识别区域：2026-11-22 实机校准，旧左边界会把大部分条目排除。"""
+
+    def test_region_covers_left_entries(self):
+        class F:
+            w, h = 1600, 900
+        x1, y1, x2, y2 = L.scale_box(F(), L._DAILY_SIDEBAR_BOX)
+        self.assertLess(x1, 148)          # 实测条目中心最小 x=148
+        self.assertGreater(x2, 276)       # 实测条目中心最大 x=276
+        self.assertLess(y1, 156)
+
+    def test_select_keeps_multiple_entries(self):
+        class F:
+            w, h = 1600, 900
+        items = [(157, 156, "月度登录", 0.9), (148, 262, "活跃挑战领奖", 0.9),
+                 (200, 368, "星系焕新", 0.9), (189, 476, "官方设定集", 0.9)]
+        self.assertEqual(len(L._select_activity_entries(items, F())), 4)
 
 
 if __name__ == "__main__":

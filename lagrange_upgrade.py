@@ -789,6 +789,43 @@ def find_adb():
     return _locate(CONFIG)
 
 
+# 局域网 / 网络 ADB 设备（IP:端口）。本机回环 127.0.0.1:* 由端口扫描负责，不在此列。
+_NET_ADB_ADDR_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}$")
+
+
+def is_network_adb_addr(addr):
+    """是否是需要主动 `adb connect` 的网络设备地址（非本机回环）。"""
+    a = str(addr or "").strip()
+    return bool(_NET_ADB_ADDR_RE.match(a)) and not a.startswith("127.0.0.1:")
+
+
+def adb_reconnect_addrs(cfg=None, state=None, open_ports=()):
+    """构造掉线后要主动重连的地址，按优先级去重：
+
+    ① config.device.serial 指定的网络设备 ② 上次成功连接的网络设备
+    ③ 本机正在监听的模拟器端口（127.0.0.1:*）。
+
+    纯函数，便于无设备单测。实机教训：MuMu / WiFi ADB 通道会掉线，
+    旧 scan_and_connect 只会连 127.0.0.1 端口，局域网设备一掉就再也连不回来。
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    out = []
+    want = str((cfg.get("device", {}) or {}).get("serial") or "").strip()
+    last = str(state.get("last_device") or "").strip()
+    for a in (want, last):
+        if is_network_adb_addr(a) and a not in out:
+            out.append(a)
+    for p in open_ports or ():
+        try:
+            a = f"127.0.0.1:{int(p)}"
+        except (TypeError, ValueError):
+            continue
+        if a not in out:
+            out.append(a)
+    return out
+
+
 class Adb:
     # 主流模拟器 ADB 端口（覆盖雷电/MuMu/夜神/逍遥/蓝叠/腾讯）
     KNOWN_PORTS = (16384, 5555, 7555, 62001, 21503, 5556, 5557, 5559,
@@ -810,9 +847,21 @@ class Adb:
         self.device = None
         self.w, self.h = DESIGN_W, DESIGN_H
         self._server_reset_done = False   # kill-server 自愈只做一次
+        # 掉线重连候选：配置里指定的网络设备 + 上次成功连上的网络设备。
+        # 只放实例属性，bare Adb（单测用 object.__new__ 造的）不会有它，行为保持不变。
+        self._net_addrs = list(dict.fromkeys(
+            a for a in (
+                str((CONFIG.get("device", {}) or {}).get("serial") or "").strip(),
+                str((_load_state() or {}).get("last_device") or "").strip(),
+            ) if is_network_adb_addr(a)))
         if auto_connect:
             self.device = self._pick_device()
             self.w, self.h = self._get_resolution()
+            if is_network_adb_addr(self.device):
+                st = _load_state()
+                if st.get("last_device") != self.device:
+                    st["last_device"] = self.device
+                    _save_state(st)
             print(f"{C.ACCENT}▸ ADB{C.R}      {C.DIM}{self.path}{C.R}")
             print(f"{C.ACCENT}▸ 设备{C.R}     {C.HL}{self.device}{C.R}    {C.DIM}分辨率: {self.w}x{self.h}{C.R}")
 
@@ -891,19 +940,31 @@ class Adb:
             s.close()
 
     def scan_and_connect(self, budget=None):
-        """扫描已知端口并连接。返回连接上的设备列表，整轮不超过 budget 秒。"""
+        """扫描已知端口并连接。返回连接上的设备列表，整轮不超过 budget 秒。
+
+        网络设备（IP:端口，如 WiFi ADB / 桥接模拟器）不会出现在 127.0.0.1 端口表里，
+        通道一掉就再也连不回来；所以把 __init__ 记下的网络地址排在候选最前面。
+        """
         budget = self._SCAN_BUDGET if budget is None else float(budget)
         deadline = time.monotonic() + budget
+        open_ports = []
         for port in dict.fromkeys(self.KNOWN_PORTS):   # 去重（21503 写了两次）
             if port == 0:
                 continue
             if time.monotonic() >= deadline:
                 print(f"{C.WARN}[ADB] 端口扫描已达 {budget:g}s 预算，停止扫描{C.R}")
                 break
-            if not self._port_open(port):
-                continue
+            if self._port_open(port):
+                open_ports.append(port)
+        addrs = list(dict.fromkeys(
+            list(getattr(self, "_net_addrs", ()) or ())
+            + adb_reconnect_addrs(open_ports=open_ports)))
+        for addr in addrs:
+            if time.monotonic() >= deadline:
+                print(f"{C.WARN}[ADB] 连接已达 {budget:g}s 预算，停止重连{C.R}")
+                break
             try:
-                self.raw("connect", f"127.0.0.1:{port}", timeout=2)
+                self.raw("connect", addr, timeout=2)
             except Exception:
                 pass
         return self.list_devices()
@@ -1206,28 +1267,37 @@ ICON_ONLY_ENTRIES = {
                 "2310x1080 历史截图实测 (467,865)，说明不同设备布局不同，模板优先",
     },
     "activity_entry": {
-        "name": "活动入口（纯图标，待实机校准）",
-        "template": None,
-        "search": (0, 0, DESIGN_W, 160),
-        "fallback": None,
-        "verify": ("探险协议",),
-        "note": "旧兜底 (320,60) 实测是等级图标 / 公告跑马灯，已禁用，绝不盲点",
+        "name": "活动入口（左上剪贴板图标）",
+        # 2026-11-22 实机确认：星图点左上 (150,46)@1600x900 打开的就是活动面板
+        # （页签「活动 / 探险协议 / 永恒战场」+ 月度登录 / 活跃挑战领奖等侧栏条目）。
+        # 之前一直没找到活动图标，是因为这个入口被命名成了「任务清单」。
+        "template": "icon_task.png",
+        "search": (0, 0, 420, 150),
+        "fallback": (217, 55),
+        "threshold": 0.66,
+        "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
+        "verify": ("探险协议", "永恒战场"),
+        "note": "旧兜底 (320,60) 实测是等级图标 / 公告跑马灯，已彻底移除，绝不盲点",
     },
     "close_x": {
         "name": "面板关闭 X",
         "template": "close_x.png",
         "search": (0, 0, DESIGN_W, 320),
-        "fallback": (2090, 64),
+        "fallback": (2195, 70),
         "threshold": 0.70,
         "scales": (0.8, 1.0, 1.25),
-        "note": "宽搜索区兼容左上/右上的 X；find_close_x 用的是同一模板",
+        "note": "宽搜索区兼容左上/右上的 X；find_close_x 用的是同一模板。"
+                "2026-11-22 实机：活动面板 X (1522,56)、战报面板 X (1525,61) @1600x900 → 设计基准 (2195,70)",
     },
     "task_close": {
         "name": "任务面板关闭（门形图标）",
-        "template": None,
+        "template": "icon_task_close.png",
         "search": (DESIGN_W - 350, 0, DESIGN_W, 140),
-        "fallback": (2143, 66),
-        "note": "真机旧值 (2080,43) 作备选",
+        "fallback": (2100, 65),
+        "threshold": 0.66,
+        "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
+        "note": "2026-11-22 从历史任务面板截图裁模板：task.png / task_wt.png 命中 (2100,65)@1.00，"
+                "星图与实机星图均不误命中；旧 (2143,66) / 真机 (2080,43) 仅作布局差异兜底",
     },
     "live_widget": {
         "name": "基地建设页右上直播挂件",
@@ -1389,8 +1459,8 @@ def cmd_icons(adb):
         print(f"  {eid:<18}{cfg['name'][:10]:<16}{pos:<16}{how:<12}{sc:<8}")
     out = os.path.join(app_dir(), "icons_标注.png")
     annotated.save(out)
-    act = icon_entry_cfg("activity_entry")
-    ax1, ay1, ax2, ay2 = scale_box(adb, act["search"])
+    # 活动区放大图固定裁顶部整条供人工指认图标；与注册表搜索区解耦
+    ax1, ay1, ax2, ay2 = scale_box(adb, (0, 0, DESIGN_W, 160))
     crop = Image.fromarray(img[max(0, ay1):ay2, max(0, ax1):ax2])
     crop = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)), Image.LANCZOS)
     cout = os.path.join(app_dir(), "icons_活动区.png")
@@ -1404,8 +1474,8 @@ def cmd_icons(adb):
     print(f"{C.OK}标注图: {out}{C.R}")
     print(f"{C.OK}活动区放大图: {cout}{C.R}")
     print(f"{C.OK}左下快捷条放大图: {bout}{C.R}")
-    print(f"{C.DIM}找到活动图标后，把中心坐标写进 config.json 的 "
-          f"icon_entries.activity_entry.fallback（设计基准 2310x1080）{C.R}")
+    print(f"{C.DIM}如需覆盖某个入口，把设计基准 2310x1080 的中心坐标写进 "
+          f"config.json 的 icon_entries.<入口ID>.fallback，或把裁好的图标放 refs/{C.R}")
     return rows
 
 
@@ -2393,8 +2463,8 @@ _DAILY_EXCLUDE_KW = ("补签", "可补签", "升级", "购买", "强化点", "�
                      "确认", "关闭", "取消", "返回", "领取中", "已领取", "已领")
 # 只认“按钮级”短文本（≤6 字），避免把「签到25天领专属礼装」这类横幅/说明文字当按钮点
 _DAILY_BTN_MAXLEN = 6
-_DAILY_CLOSE_X = (2090, 64)              # 活动面板关闭 X（2310x1080 实测）
-_DAILY_SIDEBAR_BOX = (300, 100, 560, 1000)   # 活动面板左侧活动列表（用于逐条切换）
+_DAILY_CLOSE_X = (2195, 70)              # 活动/战报面板关闭 X（2026-11-22 实机校准）
+_DAILY_SIDEBAR_BOX = (100, 100, 620, 1000)   # 活动面板左侧活动列表（2026-11-22 实机校准：旧左边界 300 会把 x<207 的条目全排除，只识别到 1 条）
 _MAIL_LIST_BOX = (300, 90, 630, 930)     # 邮件列表区域（中间栏）
 _MAIL_CAT_WORDS = ("联合体", "小队", "组织", "系统", "邮件", "收藏", "全部")
 _MAIL_CLAIM_KW = ("领取", "提取附件", "一键领取", "全部领取", "领取附件")
@@ -2402,8 +2472,8 @@ _MAIL_CLAIM_KW = ("领取", "提取附件", "一键领取", "全部领取", "领
 # 任务面板（星图左上角「清单打勾」图标，无文字标签，只能靠坐标；实测 2310x1080）
 _TASK_ICON = (217, 55)      # 实机校准后的最后兜底；正常路径由 ICON_ONLY_ENTRIES.task_clipboard 模板命中
 _TASK_TABS = ("主线任务", "委托任务", "支线任务", "赏金任务", "集结")
-_TASK_CLOSE = (2143, 66)      # 任务面板右上角门形关闭图标（模拟器实测；真机旧值 2080,43 作备选）
-_TASK_CLOSE_ALT = (2080, 43)
+_TASK_CLOSE = (2100, 65)     # 任务面板右上角门形关闭图标（模板实测中心；与注册表 fallback 一致）
+_TASK_CLOSE_ALT = (2080, 43)  # 布局差异时的第二兜底
 
 
 def _daily_claim_tasks(adb, qq):
@@ -2470,10 +2540,22 @@ def _daily_claim_tasks(adb, qq):
                 adb.tap(*p2)
                 time.sleep(1.5)
 
-    cx, cy = scale_box(adb, (*_TASK_CLOSE, 0, 0))[:2]
-    adb.tap(cx, cy)
-    time.sleep(2)
+    _daily_tap_task_close(adb)
     return n
+
+
+def _daily_tap_task_close(adb, img=None):
+    """关闭任务面板：统一走纯图标入口注册表（模板优先 → 坐标兜底），不再盲点写死坐标。"""
+    img = img if img is not None else adb.screenshot()
+    hit = find_icon_entry(adb, img, "task_close") if img is not None else None
+    if hit:
+        x, y, src, _score = hit
+        log(f"关闭任务面板（{src}）：{x},{y}", "step" if src == "template" else "warn")
+    else:
+        x, y = scale_box(adb, (*_TASK_CLOSE, 0, 0))[:2]
+        log(f"关闭任务面板（旧常量兜底）：{x},{y}", "warn")
+    adb.tap(x, y)
+    time.sleep(2)
 
 
 def _daily_ensure_starmap(adb):
@@ -2500,9 +2582,7 @@ def _daily_ensure_starmap(adb):
         # 任务面板残留（有五个任务页签）→ 点右上角门形图标关闭
         if "主线任务" in texts or "赏金任务" in texts:
             log("关闭残留的任务面板", "warn")
-            cx, cy = scale_box(adb, (*_TASK_CLOSE, 0, 0))[:2]
-            adb.tap(cx, cy)
-            time.sleep(2)
+            _daily_tap_task_close(adb, img)
             # 布局差异兜底：仍未关掉就换旧坐标再试一次，避免在面板里反复空转
             img_c = adb.screenshot()
             if img_c is not None:
@@ -2652,8 +2732,8 @@ def _daily_enter_activity(adb):
     点完必须验证『探险协议』页签或左侧活动条目出现，否则明确跳过。
 
     注：旧兜底 (320,60) 实测是等级图标 / 公告跑马灯，已彻底移除，绝不盲点。
-    活动入口是纯图标，需运行 `icons` 校准后把坐标写进 config.json 的
-    icon_entries.activity_entry.fallback，或放入模板 icon_activity.png。"""
+    2026-11-22 实机确认活动入口就是左上剪贴板图标（与任务清单入口同一个），
+    注册表已内置模板与坐标；可用 config.json 的 icon_entries.activity_entry 覆盖。"""
     img = adb.screenshot()
     if img is None:
         raise RuntimeError("活动入口：截图失败")
