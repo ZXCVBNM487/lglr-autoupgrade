@@ -432,10 +432,11 @@ ACTIONS = [
     ("② 读当前状态", "status", "资源与建造队列（勿与升级同时跑）", "基础检测", False),
     ("③ 截图", "shot", "截当前画面并在右侧预览", "基础检测", False),
     ("④ 整屏 OCR", "scan", "识别整屏文字并标注坐标", "基础检测", False),
+    ("⑤ 图标校准", "icons", "纯图标入口检测，生成标注图与活动区放大图", "基础检测", False),
 
-    ("⑤ 日常领取", "daily", "任务 / 活动 / 邮件三段领取 ＋ 回执", "业务功能", False),
-    ("⑥ 升级循环", "autoup", "队列空位自动补位，长期挂机", "业务功能", True),
-    ("⑦ 一体化", "all", "先领取，再进入升级循环", "业务功能", True),
+    ("⑥ 日常领取", "daily", "任务 / 活动 / 邮件三段领取 ＋ 回执", "业务功能", False),
+    ("⑦ 升级循环", "autoup", "队列空位自动补位，长期挂机", "业务功能", True),
+    ("⑧ 一体化", "all", "先领取，再进入升级循环", "业务功能", True),
 ]
 
 
@@ -1007,7 +1008,7 @@ def run_gui():
                         set_status(f"异常退出：{cmd}（退出码 {rc}）", ERR)
                     proc_holder["proc"] = None
                     set_running(False)
-                    if cmd in ("shot", "scan"):
+                    if cmd in ("shot", "scan", "icons"):
                         root.after(150, load_preview)
                     if on_done:
                         on_done()
@@ -1025,7 +1026,7 @@ def run_gui():
         except Exception:
             return
         cand = []
-        for name in ("shot.png", "scan_标注.png"):
+        for name in ("shot.png", "scan_标注.png", "icons_标注.png"):
             p = os.path.join(BASE_DIR, name)
             if os.path.isfile(p):
                 cand.append((os.path.getmtime(p), p))

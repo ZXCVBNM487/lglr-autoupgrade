@@ -7,6 +7,7 @@
   status    一屏状态汇总（屏幕 / 前台 / 建造队列 / 资源），只读
   shot      截一张图 shot.png
   scan      全屏 OCR 文字坐标标注，生成 scan_标注.png
+  icons     纯图标入口校准：检测注册表，生成 icons_标注.png / icons_活动区.png
   times     识别屏幕上的倒计时
   mark      生成界面标注图
   tap X Y   测试点击某坐标
@@ -1177,12 +1178,235 @@ def find_close_x(adb, img, search=None, threshold=0.7):
     return pos
 
 
+# ==================== 纯图标入口注册表（无文字，OCR 找不到，必须单独归类） ====================
+# 所有坐标 / 区域均为 2310x1080 设计基准，运行时一律经 scale_box 换算。
+# 识别优先级：图标模板（限定搜索区 + 多尺度）→ 设计坐标兜底 → 点击后 OCR 验证。
+# 实机校准后可用 config.json 的 "icon_entries": {"<id>": {"fallback": [x, y]}} 覆盖任意字段。
+ICON_ONLY_ENTRIES = {
+    "task_clipboard": {
+        "name": "任务清单（左上剪贴板）",
+        "template": "icon_task.png",
+        "search": (0, 0, 420, 150),
+        "fallback": (217, 55),
+        "threshold": 0.66,
+        "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
+        "verify": ("主线任务", "委托任务"),
+        "note": "2026-11-22 实机 1600x900 模板命中 (150,46)@0.85 → 设计基准 (217,55)；"
+                "旧 (147,30) 会点偏，仅保留为历史参考",
+    },
+    "mail_envelope": {
+        "name": "邮件（左下信封）",
+        "template": "icon_mail.png",
+        "search": (100, 760, 640, 960),
+        "fallback": (422, 863),
+        "threshold": 0.66,
+        "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
+        "verify": ("邮件", "系统", "全部"),
+        "note": "2026-11-22 实机 1600x900 模板命中 (292,719)@0.85 → 设计基准 (422,863)；"
+                "2310x1080 历史截图实测 (467,865)，说明不同设备布局不同，模板优先",
+    },
+    "activity_entry": {
+        "name": "活动入口（纯图标，待实机校准）",
+        "template": None,
+        "search": (0, 0, DESIGN_W, 160),
+        "fallback": None,
+        "verify": ("探险协议",),
+        "note": "旧兜底 (320,60) 实测是等级图标 / 公告跑马灯，已禁用，绝不盲点",
+    },
+    "close_x": {
+        "name": "面板关闭 X",
+        "template": "close_x.png",
+        "search": (0, 0, DESIGN_W, 320),
+        "fallback": (2090, 64),
+        "threshold": 0.70,
+        "scales": (0.8, 1.0, 1.25),
+        "note": "宽搜索区兼容左上/右上的 X；find_close_x 用的是同一模板",
+    },
+    "task_close": {
+        "name": "任务面板关闭（门形图标）",
+        "template": None,
+        "search": (DESIGN_W - 350, 0, DESIGN_W, 140),
+        "fallback": (2143, 66),
+        "note": "真机旧值 (2080,43) 作备选",
+    },
+    "live_widget": {
+        "name": "基地建设页右上直播挂件",
+        "template": None,
+        "search": (1800, 0, DESIGN_W, 140),
+        "fallback": (1915, 69),
+        "forbidden": True,
+        "note": "硬约束：不是「一键升级」，点它会陷入死循环，禁止点击",
+    },
+    "exit_cancel": {
+        "name": "退出确认框取消",
+        "template": None,
+        "search": (1200, 550, 1800, 850),
+        "fallback": (1495, 700),
+        "note": "安全护栏：仅在误弹退出确认框时使用",
+    },
+}
+
+
+def icon_entry_cfg(entry_id):
+    """取注册表条目，允许 config.json 的 icon_entries 覆盖（实机校准后填坐标）。"""
+    base = ICON_ONLY_ENTRIES.get(entry_id)
+    if not base:
+        return None
+    cfg = dict(base)
+    user = (CONFIG.get("icon_entries", {}) or {}).get(entry_id)
+    if isinstance(user, dict):
+        cfg.update(user)
+    return cfg
+
+
+def template_match_multiscale(img, tmpl, threshold=0.7, scales=(1.0,)):
+    """多尺度模板匹配：返回 (中心x, 中心y, 分数, 实际缩放) 或 None。"""
+    if cv2 is None or img is None or tmpl is None:
+        return None
+    best = None
+    for s in scales:
+        if abs(s - 1.0) < 0.01:
+            t = tmpl
+        else:
+            nw = max(1, int(tmpl.shape[1] * s))
+            nh = max(1, int(tmpl.shape[0] * s))
+            t = np.array(Image.fromarray(tmpl).resize((nw, nh), Image.LANCZOS))
+        if t.shape[0] > img.shape[0] or t.shape[1] > img.shape[1]:
+            continue
+        res = cv2.matchTemplate(img.astype(np.uint8), t.astype(np.uint8),
+                                cv2.TM_CCOEFF_NORMED)
+        _, mx, _, loc = cv2.minMaxLoc(res)
+        if mx >= threshold and (best is None or mx > best[2]):
+            best = (int(loc[0] + t.shape[1] / 2),
+                    int(loc[1] + t.shape[0] / 2), float(mx), s)
+    return best
+
+
+def find_icon_entry(adb, img, entry_id, allow_fallback=True):
+    """定位纯图标入口。返回 (x, y, source, score)；source = template / fallback。"""
+    cfg = icon_entry_cfg(entry_id)
+    if not cfg or cfg.get("forbidden"):
+        return None
+    if img is not None and cfg.get("template"):
+        tmpl = _load_template(os.path.join(app_dir(), "refs", cfg["template"]))
+        if tmpl is not None:
+            # 等比多尺度匹配：实机实测 UI 缩放不是 sx/sy 线性（1600x900 上最佳尺度 0.85，
+            # 而 sx=0.693/sy=0.833），按 sx/sy 非等比压缩模板会让图标变形、分数掉到阈值下。
+            x1, y1, x2, y2 = scale_box(adb, cfg["search"])
+            sub = img[max(0, y1):y2, max(0, x1):x2]
+            hit = template_match_multiscale(sub, tmpl,
+                                            float(cfg.get("threshold", 0.7)),
+                                            tuple(cfg.get("scales", (1.0,))))
+            if hit:
+                return (x1 + hit[0], y1 + hit[1], "template", hit[2])
+    fb = cfg.get("fallback")
+    if allow_fallback and fb:
+        x, y, _, _ = scale_box(adb, (fb[0], fb[1], 0, 0))
+        return (x, y, "fallback", 0.0)
+    return None
+
+
+def tap_icon_entry(adb, entry_id, verify_texts=None, settle=2.5):
+    """点击纯图标入口；可选点击后 OCR 验证界面是否真的打开。返回是否成功。"""
+    cfg = icon_entry_cfg(entry_id)
+    if not cfg or cfg.get("forbidden"):
+        log(f"纯图标入口 {entry_id} 被标记为禁点，已拦截", "warn")
+        return False
+    img = adb.screenshot()
+    hit = find_icon_entry(adb, img, entry_id)
+    if not hit:
+        log(f"纯图标入口「{cfg['name']}」未校准：模板未命中且无兜底坐标；"
+            f"请运行 icons 校准，再把坐标写进 config.json 的 "
+            f"icon_entries.{entry_id}.fallback", "warn")
+        return False
+    x, y, src, score = hit
+    adb.tap(x, y)
+    log(f"点击纯图标入口 {cfg['name']} ({x},{y}) · {src}"
+        + (f" · 匹配 {score:.2f}" if src == "template" else " · 坐标兜底"),
+        "step" if src == "template" else "warn")
+    time.sleep(settle)
+    if verify_texts:
+        img2 = adb.screenshot()
+        if img2 is None:
+            return False
+        texts = " ".join(t for _, _, t, _ in _au_ocr_all(img2))
+        if not any(k in texts for k in verify_texts):
+            log(f"纯图标入口 {cfg['name']} 点击后未出现预期界面 {verify_texts}，判定失败", "warn")
+            return False
+    return True
+
+
 # ==================== 命令 ====================
 def cmd_shot(adb):
     img = adb.screenshot()
     out = os.path.join(app_dir(), "shot.png")
     Image.fromarray(img).save(out)
     log(f"截图已保存: {out}（分辨率 {adb.w}x{adb.h}）")
+
+
+def cmd_icons(adb):
+    """纯图标入口校准：截图后逐个检测注册表，输出报告并生成标注图。
+
+    绿点 = 模板命中，黄点 = 坐标兜底，红叉 = 禁点区，蓝框 = 搜索区。
+    另外把活动入口搜索区单独裁剪放大，便于人工找图标 / 裁模板。
+    """
+    from PIL import ImageDraw, ImageFont
+    img = adb.screenshot()
+    if img is None:
+        raise RuntimeError("图标校准：截图失败")
+    try:
+        font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 18)
+    except Exception:
+        font = ImageFont.load_default()
+    annotated = Image.fromarray(img).copy()
+    draw = ImageDraw.Draw(annotated)
+    print(f"{C.ACCENT}纯图标入口校准 · 当前分辨率 {adb.w}x{adb.h}{C.R}")
+    print(f"{C.DIM}{'入口 ID':<18}{'名称':<16}{'定位':<16}{'方式':<12}{'分数':<8}{C.R}")
+    rows = []
+    for eid in ICON_ONLY_ENTRIES:
+        cfg = icon_entry_cfg(eid)
+        forbidden = bool(cfg.get("forbidden"))
+        x1, y1, x2, y2 = scale_box(adb, cfg["search"])
+        draw.rectangle([x1, y1, x2, y2],
+                       outline=(220, 70, 70) if forbidden else (80, 150, 210), width=2)
+        hit = None if forbidden else find_icon_entry(adb, img, eid)
+        if hit:
+            cx, cy, src, score = hit
+            col = (60, 215, 110) if src == "template" else (235, 185, 60)
+            draw.ellipse([cx - 12, cy - 12, cx + 12, cy + 12], outline=col, width=3)
+            draw.text((cx + 14, cy - 10), eid, fill=col, font=font)
+            pos, how, sc = f"({cx},{cy})", src, f"{score:.2f}" if src == "template" else "-"
+        elif forbidden:
+            fb = cfg.get("fallback")
+            if fb:
+                fx, fy, _, _ = scale_box(adb, (fb[0], fb[1], 0, 0))
+                draw.line([fx - 12, fy - 12, fx + 12, fy + 12], fill=(220, 70, 70), width=3)
+                draw.line([fx - 12, fy + 12, fx + 12, fy - 12], fill=(220, 70, 70), width=3)
+            pos, how, sc = "禁点", "forbidden", "-"
+        else:
+            pos, how, sc = "未命中", "需校准", "-"
+        rows.append((eid, cfg["name"], pos, how, sc))
+        print(f"  {eid:<18}{cfg['name'][:10]:<16}{pos:<16}{how:<12}{sc:<8}")
+    out = os.path.join(app_dir(), "icons_标注.png")
+    annotated.save(out)
+    act = icon_entry_cfg("activity_entry")
+    ax1, ay1, ax2, ay2 = scale_box(adb, act["search"])
+    crop = Image.fromarray(img[max(0, ay1):ay2, max(0, ax1):ax2])
+    crop = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)), Image.LANCZOS)
+    cout = os.path.join(app_dir(), "icons_活动区.png")
+    crop.save(cout)
+    # 左下纯图标快捷条（邮件等入口都在这一排），单独放大便于指认活动图标
+    bx1, by1, bx2, by2 = scale_box(adb, (60, 740, 620, 960))
+    bar = Image.fromarray(img[max(0, by1):by2, max(0, bx1):bx2])
+    bar = bar.resize((max(1, bar.width * 2), max(1, bar.height * 2)), Image.LANCZOS)
+    bout = os.path.join(app_dir(), "icons_快捷条.png")
+    bar.save(bout)
+    print(f"{C.OK}标注图: {out}{C.R}")
+    print(f"{C.OK}活动区放大图: {cout}{C.R}")
+    print(f"{C.OK}左下快捷条放大图: {bout}{C.R}")
+    print(f"{C.DIM}找到活动图标后，把中心坐标写进 config.json 的 "
+          f"icon_entries.activity_entry.fallback（设计基准 2310x1080）{C.R}")
+    return rows
 
 
 def cmd_scan(adb):
@@ -2176,7 +2400,7 @@ _MAIL_CAT_WORDS = ("联合体", "小队", "组织", "系统", "邮件", "收藏"
 _MAIL_CLAIM_KW = ("领取", "提取附件", "一键领取", "全部领取", "领取附件")
 
 # 任务面板（星图左上角「清单打勾」图标，无文字标签，只能靠坐标；实测 2310x1080）
-_TASK_ICON = (147, 30)
+_TASK_ICON = (217, 55)      # 实机校准后的最后兜底；正常路径由 ICON_ONLY_ENTRIES.task_clipboard 模板命中
 _TASK_TABS = ("主线任务", "委托任务", "支线任务", "赏金任务", "集结")
 _TASK_CLOSE = (2143, 66)      # 任务面板右上角门形关闭图标（模拟器实测；真机旧值 2080,43 作备选）
 _TASK_CLOSE_ALT = (2080, 43)
@@ -2185,7 +2409,15 @@ _TASK_CLOSE_ALT = (2080, 43)
 def _daily_claim_tasks(adb, qq):
     """任务面板：逐个页签点「一键领取」。这是每日奖励的大头（主线/委托/支线/赏金/集结）。
     按钮置灰时点击无害，所以不必判断颜色。返回点击次数。"""
-    x, y = scale_box(adb, (*_TASK_ICON, 0, 0))[:2]
+    img0 = adb.screenshot()
+    hit = find_icon_entry(adb, img0, "task_clipboard")
+    if hit:
+        x, y = hit[0], hit[1]
+        log(f"任务入口由纯图标注册表定位 ({x},{y}) · {hit[2]}"
+            + (f" · 匹配 {hit[3]:.2f}" if hit[2] == "template" else ""),
+            "step" if hit[2] == "template" else "warn")
+    else:
+        x, y = scale_box(adb, (*_TASK_ICON, 0, 0))[:2]
     adb.tap(x, y)
     time.sleep(3)
     img = adb.screenshot()
@@ -2305,9 +2537,9 @@ def _daily_close_overlay(adb):
     img = adb.screenshot()
     pos = find_close_x(adb, img, search=(0, 0, adb.w, int(adb.h * 0.18))) if img is not None else None
     if pos is None:
-        x, y = _DAILY_CLOSE_X
-        pos = scale_box(adb, (x, y, 0, 0))[:2]
-        log(f"未模板命中关闭X，用兜底坐标 {pos}", "warn")
+        hit = find_icon_entry(adb, None, "close_x")   # img=None：跳过模板，直接取注册表兜底
+        pos = hit[:2] if hit else scale_box(adb, (*_DAILY_CLOSE_X, 0, 0))[:2]
+        log(f"未模板命中关闭X，用注册表兜底坐标 {pos}", "warn")
     adb.tap(*pos)
     time.sleep(1.5)
 
@@ -2416,37 +2648,42 @@ def _daily_activity_crawl(adb, qq, max_rounds):
 
 
 def _daily_enter_activity(adb):
-    """多策略打开活动面板：先全屏 OCR 找『活动』，找不到则限定星图顶部栏区域扫描；
-    点完后验证『探险协议』页签或左侧栏活动条目确实出现，否则抛错让上层明确跳过。
+    """打开活动面板：先 OCR 找『活动』文字，找不到再查纯图标入口注册表；
+    点完必须验证『探险协议』页签或左侧活动条目出现，否则明确跳过。
 
-    注：实测星图左上 (320,60) 现已是等级图标而非活动横幅，故该兜底坐标仅作最后尝试，
-    且点完必然验证，避免像旧逻辑那样“盲点一个已知错误坐标”导致整轮 0 领取。"""
-    for attempt in range(3):
-        img = adb.screenshot()
-        if img is None:
-            raise RuntimeError("活动入口：截图失败")
-        items = _au_ocr_all(img)
-        apos = find_button(items, ["活动"], min_score=0.45)
-        if apos is None:
-            # 限定星图顶部条（设计坐标 y<130）扫描，避免误点别处
-            apos = find_button(items, ["活动"], min_score=0.45,
-                              region=scale_box(adb, (0, 0, DESIGN_W, 130)))
-        if apos is None:
-            # 最后兜底：旧文档记录的横幅位（需真机确认是否仍有效）
-            apos = scale_box(adb, (320, 60, 0, 0))[:2]
-            log("OCR 未命中活动入口，尝试兜底坐标 (320,60)（需真机确认）", "warn")
-        adb.tap(*apos)
-        time.sleep(3)
-        img2 = adb.screenshot()
-        if img2 is None:
-            raise RuntimeError("活动入口：验证截图失败")
-        items2 = _au_ocr_all(img2)
-        texts2 = " ".join(t for _, _, t, _ in items2)
-        if "探险协议" in texts2 or _select_activity_entries(items2, adb):
-            log("活动面板已打开", "ok")
-            return
-        log(f"活动入口尝试 {attempt + 1}/3：点击后未进入活动面板，重试", "warn")
-    raise RuntimeError("活动入口：3 次尝试均未打开活动面板（需真机确认入口坐标）")
+    注：旧兜底 (320,60) 实测是等级图标 / 公告跑马灯，已彻底移除，绝不盲点。
+    活动入口是纯图标，需运行 `icons` 校准后把坐标写进 config.json 的
+    icon_entries.activity_entry.fallback，或放入模板 icon_activity.png。"""
+    img = adb.screenshot()
+    if img is None:
+        raise RuntimeError("活动入口：截图失败")
+    items = _au_ocr_all(img)
+    apos = find_button(items, ["活动"], min_score=0.45)
+    src = "OCR 文字"
+    if apos is None:
+        apos = find_button(items, ["活动"], min_score=0.45,
+                          region=scale_box(adb, (0, 0, DESIGN_W, 130)))
+    if apos is None:
+        hit = find_icon_entry(adb, img, "activity_entry")
+        if hit:
+            apos = hit[:2]
+            src = f"纯图标注册表/{hit[2]}"
+            log(f"活动入口由{src}定位到 ({apos[0]},{apos[1]})", "step")
+    if apos is None:
+        raise RuntimeError("活动入口未校准：OCR 无『活动』文字，注册表也没有图标模板/坐标。"
+                           "请运行 icons 命令校准，把坐标写入 config.json 的 "
+                           "icon_entries.activity_entry.fallback")
+    adb.tap(*apos)
+    time.sleep(3)
+    img2 = adb.screenshot()
+    if img2 is None:
+        raise RuntimeError("活动入口：验证截图失败")
+    items2 = _au_ocr_all(img2)
+    texts2 = " ".join(t for _, _, t, _ in items2)
+    if "探险协议" in texts2 or _select_activity_entries(items2, adb):
+        log("活动面板已打开", "ok")
+        return
+    raise RuntimeError(f"活动入口（{src}）点击后未进入活动面板，请用 icons 命令复核坐标")
 
 
 def _daily_find_claim_btn(items, min_x=0, min_y=0):
@@ -2600,8 +2837,11 @@ def cmd_daily(adb, qq):
             items = _au_ocr_all(img) if img is not None else []
             mpos = find_button(items, ["邮件"], min_score=0.4)
             if mpos is None:
-                mpos = scale_box(adb, (465, 860, 0, 0))[:2]
-                log("OCR 未命中邮件图标，用兜底坐标 (465,860)", "warn")
+                hit = find_icon_entry(adb, img, "mail_envelope")
+                mpos = hit[:2] if hit else scale_box(adb, (422, 863, 0, 0))[:2]
+                log(f"OCR 未命中邮件文字，改用纯图标入口 ({mpos[0]},{mpos[1]}) · "
+                    + (f"模板匹配 {hit[3]:.2f}" if hit and hit[2] == "template"
+                       else "坐标兜底"), "warn")
             adb.tap(*mpos)
             time.sleep(3)
             n = _daily_claim_mail(adb, qq, max_mails=mail_max)
@@ -2715,7 +2955,7 @@ def main():
         return
 
     # 无参数 / 未知命令：只打印用法，不连 ADB（避免因设备不在线而白等）
-    _VALID_CMDS = ("check", "scan", "shot", "times", "status", "mark",
+    _VALID_CMDS = ("check", "scan", "shot", "icons", "times", "status", "mark",
                    "tap", "autoup", "daily", "all")
     if cmd not in _VALID_CMDS:
         banner()
@@ -2743,6 +2983,8 @@ def main():
         cmd_scan(adb)
     elif cmd == "shot":
         cmd_shot(adb)
+    elif cmd == "icons":
+        cmd_icons(adb)
     elif cmd == "times":
         cmd_times(adb)
     elif cmd == "status":

@@ -863,5 +863,72 @@ class TestDeviceListMerge(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class TestIconEntries(unittest.TestCase):
+    """纯图标入口注册表、模板匹配与兜底规则（纯逻辑，无需设备）。"""
+
+    def test_registry_shape(self):
+        for eid, c in L.ICON_ONLY_ENTRIES.items():
+            self.assertIn("name", c)
+            self.assertIn("search", c)
+            self.assertEqual(len(c["search"]), 4)
+            if c.get("fallback"):
+                self.assertEqual(len(c["fallback"]), 2)
+        self.assertTrue(L.ICON_ONLY_ENTRIES["live_widget"]["forbidden"])
+        self.assertIsNone(L.ICON_ONLY_ENTRIES["activity_entry"]["fallback"],
+                          "活动入口未校准，绝不能再有盲点兜底坐标")
+
+    def test_forbidden_entry_never_located(self):
+        import numpy as np
+        img = np.zeros((100, 100, 3), dtype="uint8")
+        self.assertIsNone(L.find_icon_entry(_FakeAdb(), img, "live_widget"))
+        self.assertFalse(L.tap_icon_entry(_FakeAdb(), "live_widget"))
+
+    def test_uncalibrated_entry_returns_none(self):
+        self.assertIsNone(L.find_icon_entry(_FakeAdb(), None, "activity_entry"))
+
+    def test_config_override_supplies_fallback(self):
+        from unittest import mock
+        with mock.patch.object(L, "CONFIG",
+                               {"icon_entries": {"activity_entry": {"fallback": [333, 77]}}}):
+            cfg = L.icon_entry_cfg("activity_entry")
+            self.assertEqual(cfg["fallback"], [333, 77])
+            hit = L.find_icon_entry(_FakeAdb(), None, "activity_entry")
+            self.assertEqual(hit[2], "fallback")
+            self.assertEqual(hit[:2], (333, 77))
+
+    def test_template_hit_takes_priority_over_fallback(self):
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((200, 300, 3), dtype="uint8")
+        with mock.patch.object(L, "_load_template",
+                               return_value=np.zeros((10, 10, 3), dtype="uint8")), \
+             mock.patch.object(L, "template_match_multiscale",
+                               return_value=(50, 40, 0.93, 1.0)):
+            hit = L.find_icon_entry(_FakeAdb(), img, "task_clipboard")
+        self.assertEqual(hit[2], "template")
+        self.assertGreater(hit[3], 0.9)
+        self.assertNotEqual(hit[:2], (147, 30))       # 不是旧硬编码坐标
+
+    def test_multiscale_match_finds_square(self):
+        import numpy as np
+        img = np.zeros((60, 80, 3), dtype="uint8")
+        img[20:30, 40:50] = 255
+        img[22:26, 42:46] = 0                 # 让模板有纹理（纯色模板会让 CCOEFF 退化）
+        tmpl = img[20:30, 40:50].copy()
+        hit = L.template_match_multiscale(img, tmpl, threshold=0.9,
+                                          scales=(0.8, 1.0, 1.2))
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[0], 45, delta=2)
+        self.assertAlmostEqual(hit[1], 25, delta=2)
+        self.assertGreaterEqual(hit[2], 0.9)
+
+    def test_fallback_scaled_by_resolution(self):
+        adb = _FakeAdb(w=1600, h=900)
+        hit = L.find_icon_entry(adb, None, "mail_envelope")
+        x, y = hit[:2]
+        self.assertAlmostEqual(x, 422 * 1600 / 2310, delta=1)
+        self.assertAlmostEqual(y, 863 * 900 / 1080, delta=1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
