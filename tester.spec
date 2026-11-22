@@ -16,7 +16,6 @@ hiddenimports = [
     "lagrange_upgrade",
     "adb_locator",
     "qq_official",
-    "adb_diag",
 ]
 
 # OCR / 图像依赖：这些包带数据文件与二进制，必须整包收集

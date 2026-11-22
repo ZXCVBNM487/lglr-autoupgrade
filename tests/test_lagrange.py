@@ -617,5 +617,86 @@ class TestPerformance(unittest.TestCase):
             self.assertEqual(L.perf_settings(mode=mode)["gui_poll_ms"], ms)
 
 
+class TestRobustness(unittest.TestCase):
+    """启动不卡死（ADB 端口扫描预算）+ 日志不堆积（按天轮转）的纯逻辑测试。"""
+
+    def test_port_open(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        try:
+            self.assertTrue(L.Adb._port_open(port))
+        finally:
+            s.close()
+        self.assertFalse(L.Adb._port_open(port))
+
+    def _bare_adb(self, raw_fn, port_open_fn, devices=None):
+        adb = object.__new__(L.Adb)          # 跳过 __init__，不碰真实 adb
+        adb.path = "adb.exe"
+        adb.raw = raw_fn
+        adb._port_open = port_open_fn
+        adb.list_devices = lambda: (devices or [])
+        return adb
+
+    def test_scan_only_connects_listening_ports(self):
+        calls = []
+
+        def raw(*args, **kw):
+            calls.append(args)
+            class R:
+                stdout = b""
+            return R()
+
+        adb = self._bare_adb(raw, lambda p, timeout=0.2: p == 16384)
+        adb.scan_and_connect(budget=5)
+        self.assertTrue(calls)
+        self.assertTrue(all("127.0.0.1:16384" in c for c in calls))
+
+    def test_scan_respects_time_budget(self):
+        import time
+        calls = []
+
+        def raw(*args, **kw):
+            calls.append(args)
+            time.sleep(0.05)
+            class R:
+                stdout = b""
+            return R()
+
+        adb = self._bare_adb(raw, lambda p, timeout=0.2: True)
+        t0 = time.monotonic()
+        adb.scan_and_connect(budget=0.16)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.6)                  # 不会扫满 29 个端口
+        self.assertLess(len(calls), 6)                 # 预算内只连了少数几个
+
+    def test_prune_old_logs_keeps_recent_days(self):
+        import tempfile
+        import tester
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(1, 11):
+                open(os.path.join(d, f"202611{i:02d}_autoup.log"), "w").write("x")
+            open(os.path.join(d, "keep_me.txt"), "w").write("x")
+            open(os.path.join(d, "all_run.log"), "w").write("x")   # 非本程序命名，不能删
+            removed = tester.prune_old_logs(d, keep_days=7)
+            names = os.listdir(d)
+            self.assertEqual(len([n for n in names if n.endswith("_autoup.log")]), 7)
+            self.assertEqual(len(removed), 3)
+            self.assertIn("keep_me.txt", names)
+            self.assertIn("all_run.log", names)
+            self.assertTrue(all(n.endswith("_autoup.log") for n in removed))
+
+    def test_daily_log_path_reuses_same_day(self):
+        import tempfile
+        import tester
+        with tempfile.TemporaryDirectory() as d:
+            p1 = tester.daily_log_path(d, "autoup", day="20261122")
+            p2 = tester.daily_log_path(d, "autoup", day="20261122")
+            self.assertEqual(p1, p2)
+            self.assertTrue(p1.endswith("20261122_autoup.log"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

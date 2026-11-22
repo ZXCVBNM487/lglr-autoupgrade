@@ -1,57 +1,29 @@
-# ===== 构建/打包产物（体积大、非源码，禁止入库）=====
+# ===== 构建 / 打包产物（体积大、非源码，禁止入库）=====
 build/
 dist/
-build_log.txt
-build_log_*.txt
-_release_staging/
 __pycache__/
 *.spec.bak
 
-# ===== 运行日志（含设备序列号 5ENDU19313001205 等个人信息）=====
-/*.log
+# ===== 运行日志（可能含设备序列号 / 个人信息）=====
+*.log
 logs/
 
-# ===== 调试截图（根目录 PNG，可能含游戏账号/设备信息）=====
+# ===== 调试截图（可能含游戏账号 / 设备信息）=====
+# 根目录 PNG 一律不入库；脱敏展示图只在 docs/screenshots/ 与 refs/
 /*.png
-_launcher_shots/
-# adb 实测原始截图（含玩家昵称/联盟聊天/星区坐标，禁止入库；
-# 脱敏后的展示图在 docs/screenshots/，那两份允许提交）
-_adb_shots/
+*_shots/
+survey_shots/
 
-# ===== 真实配置（含本机路径，且未来可能填入 QQ/邮箱 凭据）=====
+# ===== 真实配置（含本机路径，且未来可能填入 QQ / 邮箱凭据）=====
 config.json
 
-# ===== 一次性诊断脚本（含硬编码设备序列号，不入库）=====
-diag_times.py
-_crop_now.py
-_crop_regions.py
-_desk_probe.py
-_find_x.py
-_icon_detect.py
-_ocr_game.py
-_win_probe.py
-
-# ===== 临时/诊断文本 =====
-_cli_test_out.txt
-_cli_test_err.txt
-_scan_out.txt
-_c.txt
-_t.txt
-
-# ===== 遗留旧打包配置 / 早期 ad-hoc 脚本（已弃用，不入库）=====
-LagrangeAssistant.spec
-LagrangeUpgrade.spec
-LagrangeUpgradeGUI.spec
-拉格朗日助手.spec
-game_launcher.spec
-1_校准坐标.bat
-2_运行升级循环.bat
-3_停止全部.bat
-
-# ===== 运行时产物 / 诊断输出（非源码，排除）=====
+# ===== 运行时产物 / 诊断输出 =====
 state.json
 gui_err.txt
-survey_shots/
 .run_lock
+_*.txt
+_*.py
+diag_times.py
 
-# 以下保留入库：refs/ 参考图标、源码 .py、tests/、README.md、config.example.json、tester.spec、*.bat
+# 以下保留入库：refs/ 参考图标、源码 .py、tests/、README.md、docs/、
+# config.example.json、profiles.example.json、tester.spec、build_exe.bat、3_停止全部.bat

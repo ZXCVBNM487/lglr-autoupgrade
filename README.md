@@ -75,8 +75,8 @@ pip install -r requirements.txt
 # 图形界面
 python tester.py
 
-# 或命令行（查看全部子命令）
-python lagrange_upgrade.py --help
+# 或命令行（不带参数即打印全部子命令）
+python lagrange_upgrade.py
 ```
 
 ## 🚀 命令行使用
@@ -85,11 +85,17 @@ python lagrange_upgrade.py --help
 
 | 指令 | 说明 |
 | --- | --- |
-| `autoup` | 自动升级建筑（循环挂机） |
+| `all` | 一体化：日常领取 → 自动升级循环（**挂机首选**） |
+| `autoup` | 自动升级建筑（循环挂机，队列驱动） |
 | `daily` | 日常领取（任务 + 活动 + 邮件） |
-| `all` | 一体化（`autoup` + `daily`） |
-| `check` | 连接与运行环境自检 |
-| `status` | 查看建造队列状态 |
+| `check` | 连接与运行环境自检（GUI 启动自检用） |
+| `status` | 一屏状态汇总（屏幕 / 前台 / 队列 / 资源），只读 |
+| `shot` / `scan` | 截图 / 全屏 OCR 文字坐标标注 |
+| `times` / `mark` | 列出倒计时 / 生成界面标注图 |
+| `tap X Y` | 测试点击某坐标 |
+| `genconfig` | 打印 `config.json` 路径 |
+
+不带参数运行会打印上面这份用法说明。
 
 **配置**：复制 `config.example.json` 为 `config.json`，按需填写：
 
@@ -98,12 +104,13 @@ python lagrange_upgrade.py --help
 - `adb_path`：留空则自动寻找模拟器自带 adb（雷电 / MuMu / 夜神等）；也可填完整路径或 `adb` 走系统 `PATH`
 - `au_target_building`：一键升级循环优先升级的目标建筑名（OCR 模糊匹配，留空则升可见第一个可升设施）
 - `au_locked_buildings`：绝不自动升级的建筑名单（模糊匹配，用于保护保级 / 特殊用途设施）；留空 `[]` 表示不锁定
-- 通知方式（QQ 机器人 / 企业微信等，按需配置）
+- 通知方式（QQ OneBot / QQ 官方机器人 / 邮件，默认全关，按需开启）
 
 > 真实的 `config.json` **不会被提交到仓库**，请妥善保管其中的凭据。
 >
 > 需要校准点击坐标 / OCR 区域时，先跑 `python lagrange_upgrade.py scan` 画框标注，
-> 对照 [点击坐标参数表](docs/点击坐标参数表.md) 修改 `btn_box` / `popup.close_box` 等参数。
+> 对照 [点击坐标参数表](docs/点击坐标参数表.md) 调整区域常量（所有坐标都按 2310×1080
+> 设计基准记录，由 `scale_box` 自动换算到实际分辨率）。
 
 ### 🧩 速本方案（多套升级配置保存与切换）
 
@@ -167,29 +174,28 @@ python lagrange_upgrade.py --help
 
 ```
 lglr-autoupgrade/
-├── lagrange_upgrade.py     # 核心：autoup / daily / all / check / status
+├── lagrange_upgrade.py     # 核心：autoup / daily / all / check / status / scan ...
 ├── tester.py               # 图形化测试仪（PyInstaller 打包为 exe）
-├── tester.spec             # 打包配置
+├── tester.spec             # 打包配置（唯一有效的一条打包链）
 ├── build_exe.bat           # 一键打包脚本
+├── 3_停止全部.bat           # 停止挂机并释放 ADB（GUI 里也有停止按钮）
 ├── adb_locator.py          # ADB 智能定位（被核心引用）
-├── qq_official.py          # QQ 机器人推送（被核心引用）
+├── qq_official.py          # QQ 官方机器人推送（默认关闭，被核心引用）
 ├── config.example.json     # 配置模板（脱敏，不含任何凭据）
+├── profiles.example.json   # 速本方案模板
 ├── requirements.txt        # 依赖清单
-├── refs/                   # 测试仪 UI 参考图标
-├── tests/                  # 单元测试（39 项，无需设备 / OCR）
+├── refs/                   # 界面识别用的参考图标模板
+├── tests/                  # 纯逻辑单元测试（76 项，无需设备 / OCR）
 │   └── test_lagrange.py
-├── tools/                  # 辅助 / 调试脚本（非核心，按需使用）
-│   ├── adb_diag.py
-│   ├── element_survey.py
-│   ├── game_launcher.py
-│   ├── lagrange_gui.py
-│   ├── notifier_extra_channels.py
-│   └── _probe_gui.py
 ├── docs/                   # 开发笔记 + 点击坐标参数表 + 脱敏界面截图
 ├── LICENSE                 # MIT 协议
 ├── CONTRIBUTING.md         # 贡献指南
 └── README.md
 ```
+
+> `config.json` / `profiles.json` 是本地运行态文件（含设备信息与个人打法），不入库；
+> `dist/` 里的 exe 由 `build_exe.bat` 生成，也不入库。`docs/` 下的修复报告是历史记录，
+> 其中提到的旧 exe 名与旧路径已不再适用。
 
 ## ⚠️ 注意事项
 

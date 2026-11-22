@@ -141,6 +141,37 @@ def strip_ansi(s):
     return ANSI_RE.sub("", s)
 
 
+# ===== 运行日志：按天分文件 + 保留最近 7 天，避免 logs/ 无限堆积 =====
+LOG_KEEP_DAYS = 7
+LOG_NAME_RE = re.compile(r"^\d{8}_[A-Za-z0-9_]+\.log$")
+
+
+def prune_old_logs(log_dir, keep_days=LOG_KEEP_DAYS):
+    """删除本程序生成的超期日志。只匹配 YYYYMMDD_<命令>.log，绝不碰其它文件。
+    返回被删除的文件名列表，便于核对。"""
+    os.makedirs(log_dir, exist_ok=True)
+    names = [n for n in os.listdir(log_dir) if LOG_NAME_RE.match(n)]
+    days = sorted({n[:8] for n in names}, reverse=True)
+    old = set(days[keep_days:])
+    removed = []
+    for n in names:
+        if n[:8] not in old:
+            continue
+        try:
+            os.remove(os.path.join(log_dir, n))
+            removed.append(n)
+        except OSError:
+            pass
+    return removed
+
+
+def daily_log_path(log_dir, cmd, day=None):
+    """按天分文件（同一天多次运行追加到同一文件），并顺带清理超期旧日志。"""
+    day = day or time.strftime("%Y%m%d")
+    prune_old_logs(log_dir)
+    return os.path.join(log_dir, f"{day}_{cmd}.log")
+
+
 def load_cfg():
     """只读 json，不 import 主脚本（保证 GUI 秒开）。"""
     try:
@@ -612,8 +643,7 @@ def run_gui():
         if running["flag"]:
             return
         os.makedirs(LOG_DIR, exist_ok=True)
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        log_file["path"] = os.path.join(LOG_DIR, f"{stamp}_{cmd}.log")
+        log_file["path"] = daily_log_path(LOG_DIR, cmd)
         log_path_label.configure(text=os.path.basename(log_file["path"]))
 
         # 子进程输出中转文件（无控制台打包也能拿到输出）

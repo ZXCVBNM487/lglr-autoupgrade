@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-无尽的拉格朗日（星际猎人）建筑自动升级脚本
-功能：截图 -> OCR识别倒计时 -> 睡到点前 -> 再识别 -> 点击"升级" ->（可选）点"确认"
-推送：材料不足 / 升级成功 / 异常卡住 时，通过 QQ 机器人(OneBot v11) 发文字+截图
+星际猎人（无尽的拉格朗日）建筑自动升级脚本 · OCR + ADB
 
-命令：
-  LagrangeUpgrade.exe scan      校准：列出全屏文字坐标，生成 scan_标注.png
-  LagrangeUpgrade.exe shot      只截一张图（shot.png）
-  LagrangeUpgrade.exe tap X Y   测试点击某坐标
-  LagrangeUpgrade.exe run       正式运行（不带参数也是 run）
-  LagrangeUpgrade.exe autoup    真机一键升级自动循环（倒计时驱动，队列先到先补）
-  LagrangeUpgrade.exe daily     日常一键领取（任务一键领取 + 活动签到/领奖）
-  LagrangeUpgrade.exe all       一体化：日常领取 → 一键升级自动循环（挂机首选）
-  LagrangeUpgrade.exe status    一屏状态汇总（屏幕/前台/建造队列/三项资源），纯只读
-  LagrangeUpgrade.exe check     只检测 ADB 连接并打印设备信息（GUI 启动自检用）
-  LagrangeUpgrade.exe genconfig 重新生成默认 config.json
+命令（打包后用 星际猎人测试仪.exe --cli <命令>）：
+  check     只检测 ADB 连接与设备信息（GUI 启动自检用）
+  status    一屏状态汇总（屏幕 / 前台 / 建造队列 / 资源），只读
+  shot      截一张图 shot.png
+  scan      全屏 OCR 文字坐标标注，生成 scan_标注.png
+  times     识别屏幕上的倒计时
+  mark      生成界面标注图
+  tap X Y   测试点击某坐标
+  daily     日常一键领取（任务 / 活动 / 邮件）
+  autoup    一键升级自动循环：倒计时驱动、队列先到先补（挂机）
+  all       一体化：日常领取 → 一键升级自动循环（挂机首选）
+  genconfig 打印 config.json 路径
 
-所有配置在程序同目录的 config.json，首次运行自动生成。
+不带参数 = 打印本用法。所有配置在程序同目录的 config.json，首次运行自动生成。
 """
 
 import sys
@@ -97,12 +96,6 @@ def banner():
 # 坐标基于真机截图 2310x1080（超宽屏）。模拟器请设为相同/接近比例的自定义分辨率，
 # 否则 UI 位置会错位；若必须用 1280x720，请重新跑 scan 校准。
 DEFAULT_CONFIG = {
-    # 坐标基准 2310x1080，会自动按实际分辨率等比缩放
-    "btn_box": [350, 530, 800, 700],          # 资源行+倒计时+升级按钮 整块区域
-    "time_box_enabled": False,                 # 倒计时若不在按钮区，改成 true 单独框
-    "time_box": [500, 570, 700, 625],
-    "confirm_enabled": False,                  # 点升级后是否还要点“确认”（实测无弹窗就保持 false）
-    "confirm_box": [700, 700, 1600, 950],
     "adb_path": "",                            # 留空自动寻找雷电/MuMu/夜神 adb
 
     # 设备选择：模拟器与真机都支持，同时连接时按这里决定用哪台
@@ -222,28 +215,8 @@ DEFAULT_CONFIG = {
 
 DESIGN_W, DESIGN_H = 2310, 1080
 
-# 识别关键词
-# 注意：按钮必须【精确】匹配。画面上同时有“可升级”状态字和“一键升级”按钮，
-# 用包含匹配会点错，所以目标按钮只认文字恰好等于“升级/立即升级”。
-READY_EXACT = ["升级", "立即升级"]
-READY_EXCLUDE = ["一键升级", "可升级", "升级中"]
-INSUFFICIENT_KEYWORDS = ["不足", "缺少"]
-CONFIRM_KEYWORDS = ["确认", "确定"]
-
-
-def is_ready_button(text):
-    t = text.strip()
-    if any(k in t for k in READY_EXCLUDE):
-        return False
-    return t in READY_EXACT
-
-# 节奏（秒）
-EARLY_WAKE = 20
-MIN_SLEEP = 15
-IDLE_SLEEP = 20
-INSUFFICIENT_WAIT = 600
+# 点击抖动（像素）：避免每次都点在同一像素上
 CLICK_JITTER = 6
-WAIT_AFTER_CLICK = 8
 
 
 def app_dir():
@@ -824,7 +797,9 @@ class Adb:
                    5554, 5558, 5560, 5561, 5562, 5563, 5564, 5565,
                    21503, 21513, 21523, 21533, 21543, 21553,
                    7401, 7402, 7403, 7404, 7405,        # 夜神多开
-                   5037, 0)                              # 5037=默认 server
+                   0)                                    # 0 = 哨兵，跳过
+    # 注意：5037 是 adb server 自己的控制端口，不是设备端口；
+    # 以前误把它写进列表，会连出一个 offline 假设备并拖慢启动。
 
     def __init__(self, auto_connect=True):
         self.path = find_adb()
@@ -858,7 +833,7 @@ class Adb:
             pass
         return True
 
-    def run(self, *args, timeout=30):
+    def run(self, *args, timeout=10):
         r = subprocess.run([self.path, "-s", self.device, *args],
                            capture_output=True, timeout=timeout)
         # protocol fault / device not found → server 冲突，重启后重试一次
@@ -869,7 +844,7 @@ class Adb:
                                capture_output=True, timeout=timeout)
         return r
 
-    def raw(self, *args, timeout=30):
+    def raw(self, *args, timeout=10):
         """不指定 -s 设备的原始 adb 命令（用于 devices / connect）"""
         return subprocess.run([self.path, *args],
                               capture_output=True, timeout=timeout)
@@ -877,7 +852,7 @@ class Adb:
     def list_devices(self):
         """返回已连接的设备 ID 列表（含状态）"""
         try:
-            out = self.raw("devices").stdout.decode("utf-8", "replace")
+            out = self.raw("devices", timeout=8).stdout.decode("utf-8", "replace")
         except Exception:
             return []
         result = []
@@ -893,19 +868,44 @@ class Adb:
     def connect(self, addr):
         """连接指定 IP:端口，返回 (success, message)"""
         try:
-            r = self.raw("connect", addr, timeout=15)
+            r = self.raw("connect", addr, timeout=3)
             msg = r.stdout.decode("utf-8", "replace").strip()
             return ("connected" in msg.lower() or "already" in msg.lower()), msg
         except Exception as e:
             return False, str(e)
 
-    def scan_and_connect(self):
-        """扫描所有已知端口并连接，返回连接上的设备列表"""
-        for port in self.KNOWN_PORTS:
+    # 没设备时也必须在几秒内给出结论：先用本机 TCP 探测筛掉没在监听的端口，
+    # 再只对存活端口发 adb connect，并给整轮扫描设总时间预算。
+    # 旧实现盲连 29 个端口 × 每个最多等 8 秒，设备掉线时启动能卡好几分钟。
+    _SCAN_BUDGET = 6.0
+
+    @staticmethod
+    def _port_open(port, timeout=0.2):
+        """本机 TCP 端口是否在监听（比 adb connect 快得多，失败立刻返回）。"""
+        import socket
+        s = socket.socket()
+        s.settimeout(timeout)
+        try:
+            return s.connect_ex(("127.0.0.1", int(port))) == 0
+        except Exception:
+            return False
+        finally:
+            s.close()
+
+    def scan_and_connect(self, budget=None):
+        """扫描已知端口并连接。返回连接上的设备列表，整轮不超过 budget 秒。"""
+        budget = self._SCAN_BUDGET if budget is None else float(budget)
+        deadline = time.monotonic() + budget
+        for port in dict.fromkeys(self.KNOWN_PORTS):   # 去重（21503 写了两次）
             if port == 0:
                 continue
+            if time.monotonic() >= deadline:
+                print(f"{C.WARN}[ADB] 端口扫描已达 {budget:g}s 预算，停止扫描{C.R}")
+                break
+            if not self._port_open(port):
+                continue
             try:
-                self.raw("connect", f"127.0.0.1:{port}", timeout=8)
+                self.raw("connect", f"127.0.0.1:{port}", timeout=2)
             except Exception:
                 pass
         return self.list_devices()
@@ -955,15 +955,16 @@ class Adb:
         return DESIGN_W, DESIGN_H
 
     def screenshot(self):
-        raw = self.run("exec-out", "screencap", "-p").stdout
+        # 全屏 PNG 传输比普通 shell 命令慢，单独放宽超时
+        raw = self.run("exec-out", "screencap", "-p", timeout=20).stdout
         img = None
         if raw[:4] == b"\x89PNG":
             img = np.array(Image.open(io.BytesIO(raw)).convert("RGB"))
         else:
-            self.run("shell", "screencap", "-p", "/sdcard/_lag_shot.png")
+            self.run("shell", "screencap", "-p", "/sdcard/_lag_shot.png", timeout=20)
             tmp = os.path.join(app_dir(), "_lag_shot.png")
             try:
-                self.run("pull", "/sdcard/_lag_shot.png", tmp)
+                self.run("pull", "/sdcard/_lag_shot.png", tmp, timeout=20)
                 img = np.array(Image.open(tmp).convert("RGB"))
             finally:
                 # 清理临时文件，避免在模拟器和本地越积越多
@@ -1109,16 +1110,6 @@ def box_center(box):
             int(sum(p[1] for p in box) / 4))
 
 
-def ocr_region(adb, img, region_box):
-    x1, y1, x2, y2 = scale_box(adb, tuple(region_box))
-    part = img[max(0, y1):y2, max(0, x1):x2]
-    result, _ = get_ocr()(part)
-    items = []
-    if result:
-        for box, text, score in result:
-            cx, cy = box_center(box)
-            items.append((cx + x1, cy + y1, text, float(score)))
-    return items
 
 
 # ==================== 通用识别 / 点击（OCR 文字优先 + 图标模板兜底） ====================
@@ -1154,24 +1145,6 @@ def find_button(items, keywords, exclude=None, region=None, min_score=0.45,
     return cands[0][0], cands[0][1]
 
 
-def tap_text(adb, items, *keywords, jitter=CLICK_JITTER, exclude=None, region=None,
-             min_score=0.45, prefer="any", fallback=None):
-    """OCR 找文字按钮并点击，返回是否点到。未识别到时用 fallback=(x,y) 兜底并报警。"""
-    pos = find_button(items, keywords, exclude=exclude, region=region,
-                      min_score=min_score, prefer=prefer)
-    if pos is None:
-        if fallback:
-            log(f"OCR 未命中 {keywords}，回退到兜底坐标 {fallback}", "warn")
-            x, y = fallback
-            adb.tap(x + random.randint(-jitter, jitter),
-                    y + random.randint(-jitter, jitter))
-            return True
-        log(f"OCR 未命中 {keywords}，跳过", "warn")
-        return False
-    log(f"OCR 命中 {keywords} → 点击 ({pos[0]},{pos[1]})", "info")
-    adb.tap(pos[0] + random.randint(-jitter, jitter),
-            pos[1] + random.randint(-jitter, jitter))
-    return True
 
 
 def _load_template(path):
@@ -1233,7 +1206,7 @@ def cmd_scan(adb):
         return
     annotated = Image.fromarray(img.copy())
     draw = ImageDraw.Draw(annotated)
-    log(f"全屏文字列表（{C.HL}找「升级」和倒计时坐标{C.R}，据此修改 config.json 的 btn_box）：")
+    log(f"全屏文字列表（{C.HL}找按钮文字与倒计时坐标，用于校准识别区域{C.R}）：")
     print(f"  {C.DIM}{'#':<4}{'文字':<16}{'中心坐标':<16}{'置信度':<8}{C.R}")
     for i, (box, text, score) in enumerate(result):
         cx, cy = box_center(box)
@@ -1247,7 +1220,7 @@ def cmd_scan(adb):
     out = os.path.join(app_dir(), "scan_标注.png")
     annotated.save(out)
     log(f"标注图已保存: {out}", "ok")
-    log("把目标坐标上下左右各放宽 40~60 像素，填进 config.json 的 btn_box")
+    log("坐标按 2310x1080 设计基准记录；脚本会用 scale_box 自动换算到实际分辨率")
 
 
 def cmd_times(adb):
@@ -1436,14 +1409,6 @@ def cmd_tap(adb, x, y):
     adb.tap(x, y)
 
 
-def click_confirm_if_any(adb, img):
-    for cx, cy, text, _ in ocr_region(adb, img, CONFIG["confirm_box"]):
-        if any(k in text for k in CONFIRM_KEYWORDS):
-            adb.tap(cx + random.randint(-CLICK_JITTER, CLICK_JITTER),
-                    cy + random.randint(-CLICK_JITTER, CLICK_JITTER))
-            log(f"已点击确认按钮 ({cx},{cy})")
-            return True
-    return False
 
 
 def try_close_popup(adb, img, qq=None, stats=None):
@@ -1489,209 +1454,6 @@ def fmt_duration(sec):
     return f"{s}秒"
 
 
-def cmd_run(adb, qq):
-    qcfg = CONFIG["qq"]
-    lost_threshold = int(qcfg.get("lost_threshold", 3))
-    long_wait_alert = int(qcfg.get("long_wait_alert", 0))
-    log("开始循环，按 Ctrl+C 停止", "ok")
-
-    # 当日统计（跨天自动汇总并清零）
-    stats = {"date": time.strftime("%Y-%m-%d"), "started_at": time.time(),
-             "clicks": 0, "insufficient": 0, "popups": 0, "lost": 0,
-             "errors": 0, "disconnects": 0, "last_event": "刚启动"}
-    heartbeat_stop = threading.Event()
-
-    def daily_rollover(force=False):
-        today = time.strftime("%Y-%m-%d")
-        if stats["date"] == today and not force:
-            return
-        uptime = time.time() - stats["started_at"]
-        qq.push("daily_summary",
-                f"{stats['date']} 运行汇总\n"
-                f"━━━━━━━━━━━━━\n"
-                f"🔨 点击升级：{stats['clicks']} 次\n"
-                f"⚠️ 材料不足：{stats['insufficient']} 次\n"
-                f"🧹 关闭弹窗：{stats['popups']} 次\n"
-                f"❓ 卡住报警：{stats['lost']} 次\n"
-                f"❗ 报错次数：{stats['errors']} 次\n"
-                f"🔌 断连次数：{stats['disconnects']} 次\n"
-                f"⏱️ 运行时长：{fmt_duration(uptime)}",
-                force=True, with_shot=False)
-        stats.update(date=today, started_at=time.time(), clicks=0,
-                     insufficient=0, popups=0, lost=0, errors=0, disconnects=0)
-
-    def heartbeat_loop():
-        interval = int(qcfg.get("heartbeat_interval", 3600))
-        while not heartbeat_stop.wait(interval):
-            daily_rollover()
-            uptime = time.time() - stats["started_at"]
-            qq.push("heartbeat",
-                    f"运行中，一切正常\n"
-                    f"━━━━━━━━━━━━━\n"
-                    f"⏱️ 已值守：{fmt_duration(uptime)}\n"
-                    f"🔨 今日点击升级：{stats['clicks']} 次\n"
-                    f"📌 最近状态：{stats['last_event']}",
-                    with_shot=False)
-
-    hb = threading.Thread(target=heartbeat_loop, daemon=True)
-    hb.start()
-
-    qq.push("start",
-            f"脚本已启动，开始值守\n"
-            f"设备：{adb.device}（{adb.w}x{adb.h}）\n"
-            f"请确认游戏已停在【建筑详情面板】", force=True, with_shot=False)
-
-    fail_streak = 0
-    shot_fail_streak = 0
-    insufficient_notified = False
-    long_alerted = False
-
-    try:
-      while True:
-        try:
-            daily_rollover()
-            try:
-                img = adb.screenshot()
-                shot_fail_streak = 0
-            except Exception as e:
-                shot_fail_streak += 1
-                stats["errors"] += 1
-                log(f"截图失败({shot_fail_streak})：{e}", "err")
-                if shot_fail_streak >= 2:
-                    stats["disconnects"] += 1
-                    qq.push("disconnect",
-                            f"无法连接模拟器（连续 {shot_fail_streak} 次截图失败）\n"
-                            f"正在尝试重新连接，请检查模拟器是否关闭/重启了")
-                    if adb.try_reconnect():
-                        log(f"重连成功：{adb.device}", "ok")
-                        qq.push("start", f"模拟器已重新连上：{adb.device}",
-                                force=True, with_shot=False)
-                        shot_fail_streak = 0
-                time.sleep(20)
-                continue
-
-            items = ocr_region(adb, img, CONFIG["btn_box"])
-            all_text = " ".join(t for _, _, t, _ in items)
-
-            # 1) 材料不足：不点，截图通知，长等
-            if any(k in all_text for k in INSUFFICIENT_KEYWORDS):
-                stats["last_event"] = "材料不足等待中"
-                if not insufficient_notified:
-                    log("材料不足，已停止点击，等待 10 分钟", "warn")
-                    stats["insufficient"] += 1
-                    qq.push("insufficient",
-                            "建筑升级材料不足，脚本已暂停点击\n"
-                            "10 分钟后自动再检查一次，补充材料后无需操作",
-                            img_bgr=img)
-                    insufficient_notified = True
-                time.sleep(INSUFFICIENT_WAIT)
-                continue
-            insufficient_notified = False
-
-            # 2) 先找“升级”按钮（精确匹配，排除一键升级/可升级）
-            target = None
-            for cx, cy, text, _ in items:
-                if is_ready_button(text):
-                    target = (cx, cy, text.strip())
-                    break
-
-            if target:
-                jx = target[0] + random.randint(-CLICK_JITTER, CLICK_JITTER)
-                jy = target[1] + random.randint(-CLICK_JITTER, CLICK_JITTER)
-                adb.tap(jx, jy)
-                stats["clicks"] += 1
-                stats["last_event"] = f"已点击升级 {time.strftime('%H:%M:%S')}"
-                log(f"可升级，已点击「{target[2]}」({jx},{jy})，今日第 {stats['clicks']} 次", "ok")
-                qq.push("upgrade_click",
-                        f"已点击「升级」，建筑开始升级\n"
-                        f"今日累计点击：{stats['clicks']} 次",
-                        img_bgr=img)
-                long_alerted = False
-                time.sleep(3)
-                if CONFIG.get("confirm_enabled"):
-                    img2 = adb.screenshot()
-                    for _ in range(2):
-                        if click_confirm_if_any(adb, img2):
-                            break
-                        time.sleep(2)
-                        img2 = adb.screenshot()
-                time.sleep(WAIT_AFTER_CLICK)
-                fail_streak = 0
-                continue
-
-            # 3) 没有按钮 -> 找倒计时（升级中）
-            secs = None
-            for _, _, text, _ in items:
-                secs = parse_seconds(text)
-                if secs is not None:
-                    break
-            if secs is None and CONFIG.get("time_box_enabled"):
-                for _, _, text, _ in ocr_region(adb, img, CONFIG["time_box"]):
-                    secs = parse_seconds(text)
-                    if secs is not None:
-                        break
-
-            if secs is not None and secs > 5:
-                stats["last_event"] = f"升级中，剩 {fmt_duration(secs)}"
-                wait = max(MIN_SLEEP, secs - EARLY_WAKE)
-                h, m, s = secs // 3600, secs % 3600 // 60, secs % 60
-                log(f"升级中，剩余 {h:02d}:{m:02d}:{s:02d}，{wait} 秒后再看", "info")
-                # 单次升级很久：每个升级周期只提醒一次
-                if long_wait_alert and secs > long_wait_alert and not long_alerted:
-                    qq.push("long_upgrade",
-                            f"本次升级预计需要 {fmt_duration(secs)}，时间较长\n"
-                            f"完成后会自动点击下一次升级并通知你",
-                            img_bgr=img, with_shot=False)
-                    long_alerted = True
-                # 长睡眠期间也要响应跨天汇总
-                slept = 0
-                while slept < wait:
-                    chunk = min(wait - slept, 60)
-                    time.sleep(chunk)
-                    slept += chunk
-                    daily_rollover()
-                fail_streak = 0
-                continue
-
-            # 4) 按钮和倒计时都没有：可能被弹窗挡住，尝试关弹窗
-            if try_close_popup(adb, img, qq, stats):
-                stats["last_event"] = "已关闭弹窗"
-                time.sleep(3)
-                continue
-
-            # 5) 确实什么都没读到
-            fail_streak += 1
-            stats["last_event"] = f"找不到按钮（第{fail_streak}次）"
-            log(f"按钮区没有倒计时也没有「升级」，{IDLE_SLEEP} 秒后重试"
-                + ("（已连续多次，请检查界面/弹窗）"
-                   if fail_streak >= lost_threshold else ""),
-                "warn" if fail_streak >= lost_threshold else "info")
-            if fail_streak == lost_threshold:
-                stats["lost"] += 1
-                qq.push("lost",
-                        f"连续 {lost_threshold} 次没识别到升级按钮\n"
-                        f"可能被弹窗挡住、建筑面板被关闭或游戏掉线，请查看截图\n"
-                        f"脚本会继续重试，恢复后自动正常",
-                        img_bgr=img)
-            time.sleep(IDLE_SLEEP)
-
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            stats["errors"] += 1
-            stats["last_event"] = f"报错：{e}"
-            log(f"出错：{e}，30 秒后重试", "err")
-            qq.push("exception", f"脚本运行报错，将在 30 秒后自动重试\n错误：{e}")
-            time.sleep(30)
-    except KeyboardInterrupt:
-        log("已手动停止", "warn")
-        qq.push("stopped",
-                f"脚本被手动停止\n今日共点击升级 {stats['clicks']} 次",
-                with_shot=False)
-    finally:
-        heartbeat_stop.set()
-        qq.flush()        # 合并模式：把没发的通知发出去
-        daily_rollover(force=True)
 
 
 # ==================== 一键升级自动循环（真机） ====================
@@ -1731,16 +1493,6 @@ def _au_find(items, keyword, min_score=0.5):
     return best
 
 
-def _au_collect_times(items):
-    """收集屏幕上所有倒计时（秒），按行合并解析以容错 OCR 拆框；排除顶部状态栏。"""
-    times = []
-    for _, cy, text, _ in _merge_lines(items):
-        if cy < 90:
-            continue
-        sec = parse_seconds(text)
-        if sec and sec >= 60:
-            times.append(sec)
-    return times
 
 
 def _pick_eta(items):
@@ -1784,9 +1536,8 @@ _AU_EXIT_KEYWORDS = ("确定要退出游戏",)
 _AU_EXIT_CANCEL = (1495, 700)
 # 在「一键升级面板 / 建筑详情」里点升级按钮时，要排除这些易混淆文字，避免误点其它动作
 _AU_UPGRADE_BTN_EXCLUDE = ["一键升级", "可升级", "升级中", "立即升级"]
-# 注：基地建设页右上 (1879~1915, 67~69) 在新版里是【直播挂件】而非「一键升级」按钮，
-# 点它会陷入死循环（见项目硬约束）。本常量已废弃，禁止再用作点击兜底坐标。
-_AU_ONKEY_BTN_DEPRECATED = (1915, 69)
+# 注：基地建设页右上 (1879~1915, 67~69) 是【直播挂件】而非「一键升级」按钮，
+# 点它会陷入死循环（见项目硬约束）。禁止再把该坐标用作点击兜底。
 _AU_STRAY_MODAL_KEYS = ("扩建规模", "扩建条件", "基地扩建")  # 误开的遮挡弹窗关键词
 
 
@@ -2969,11 +2720,19 @@ def _cleanup_adb(adb):
 
 def main():
     os.chdir(app_dir())
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
     if cmd == "genconfig":
         banner()
         print(f"{C.ACCENT}config.json 路径:{C.R} {C.HL}{os.path.join(app_dir(), 'config.json')}{C.R}")
+        return
+
+    # 无参数 / 未知命令：只打印用法，不连 ADB（避免因设备不在线而白等）
+    _VALID_CMDS = ("check", "scan", "shot", "times", "status", "mark",
+                   "tap", "autoup", "daily", "all")
+    if cmd not in _VALID_CMDS:
+        banner()
+        print(__doc__)
         return
 
     banner()
@@ -3005,8 +2764,6 @@ def main():
         cmd_mark(adb)
     elif cmd == "tap" and len(sys.argv) >= 4:
         cmd_tap(adb, int(sys.argv[2]), int(sys.argv[3]))
-    elif cmd == "run":
-        cmd_run(adb, Notifier(CONFIG))
     elif cmd == "autoup":
         cmd_autoup(adb, Notifier(CONFIG))
     elif cmd == "daily":
