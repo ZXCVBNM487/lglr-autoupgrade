@@ -1101,5 +1101,44 @@ class TestAutoupTargetAndQueueState(unittest.TestCase):
         self.assertNotIn('"keyevent", "4"', src)
 
 
+class TestFullPointCalibration(unittest.TestCase):
+    """2026-11-23 全量点位校准：任务/活动双入口 + 坐标/文字双重校验。"""
+
+    def test_task_panel_entry_is_star_emblem(self):
+        c = L.ICON_ONLY_ENTRIES["task_panel_entry"]
+        self.assertEqual(c["template"], "icon_quest.png")
+        self.assertEqual(c["fallback"], L._TASK_ICON)
+        self.assertIn("主线任务", c["verify"])
+        self.assertNotEqual(c["fallback"], L.ICON_ONLY_ENTRIES["activity_entry"]["fallback"])
+
+    def test_task_claim_uses_panel_entry(self):
+        import inspect
+        src = inspect.getsource(L._daily_claim_tasks)
+        self.assertIn('"task_panel_entry"', src)
+        self.assertNotIn('find_icon_entry(adb, img0, "task_clipboard")', src)
+
+    def test_points_config_loads(self):
+        import os
+        p = os.path.join(r'E:\拉格朗日自动升级', 'points.json')
+        self.assertTrue(os.path.isfile(p))
+        d = L.load_points()
+        self.assertEqual(len(d.get("点位", [])), 17)
+        self.assertIn("task_panel", d.get("关键入口", {}))
+        self.assertIn("activity", d.get("关键入口", {}))
+        self.assertEqual(d["关键入口"]["task_panel"]["坐标"], [53, 43])
+
+    def test_double_check_transparency(self):
+        import numpy as np
+        from unittest import mock
+        fake = _FakeAdb(1600, 900)
+        fake.tap = lambda *a, **k: None
+        fake.screenshot = lambda: np.zeros((100, 100, 3), dtype="uint8")
+        with mock.patch.object(L, "_au_ocr_all", return_value=[]):
+            ok, texts, msg = L.point_double_check(
+                fake, {"坐标": [53, 43], "验证文字": ["主线任务"]})
+        self.assertFalse(ok)
+        self.assertIn("转场", msg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -8,6 +8,7 @@
   shot      截一张图 shot.png
   scan      全屏 OCR 文字坐标标注，生成 scan_标注.png
   icons     纯图标入口校准：检测注册表，生成 icons_标注.png / icons_活动区.png
+  points    点位配置自检：读取 points.json，列出双入口与 17 个标注点
   times     识别屏幕上的倒计时
   mark      生成界面标注图
   tap X Y   测试点击某坐标
@@ -1245,16 +1246,28 @@ def find_close_x(adb, img, search=None, threshold=0.7):
 # 识别优先级：图标模板（限定搜索区 + 多尺度）→ 设计坐标兜底 → 点击后 OCR 验证。
 # 实机校准后可用 config.json 的 "icon_entries": {"<id>": {"fallback": [x, y]}} 覆盖任意字段。
 ICON_ONLY_ENTRIES = {
+    "task_panel_entry": {
+        "name": "任务面板（左上星形徽记 #13）",
+        "template": "icon_quest.png",
+        "search": (0, 0, 200, 150),
+        "fallback": (77, 52),
+        "threshold": 0.66,
+        "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
+        "verify": ("主线任务", "委托任务", "支线任务", "活动任务"),
+        "note": "2026-11-23 参考图标注 #13 + 实机确认：星形徽记 (53,43)@1600x900 → "
+                "设计基准 (77,52)；点后 OCR 读到主线/委托/支线/活动任务。"
+                "此前误用剪贴板图标当任务入口，导致 daily 任务段永远找不到页签",
+    },
     "task_clipboard": {
-        "name": "任务清单（左上剪贴板）",
+        "name": "活动面板（左上剪贴板 #14）",
         "template": "icon_task.png",
         "search": (0, 0, 420, 150),
         "fallback": (217, 55),
         "threshold": 0.66,
         "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
-        "verify": ("主线任务", "委托任务"),
-        "note": "2026-11-22 实机 1600x900 模板命中 (150,46)@0.85 → 设计基准 (217,55)；"
-                "旧 (147,30) 会点偏，仅保留为历史参考",
+        "verify": ("探险协议", "永恒战场", "月度登录"),
+        "note": "2026-11-23 正名：这个剪贴板图标是【活动入口】不是任务；"
+                "任务入口是 #13 星形徽记 task_panel_entry。实机命中 (150,46)@0.85",
     },
     "mail_envelope": {
         "name": "邮件（左下信封）",
@@ -1407,6 +1420,53 @@ def tap_icon_entry(adb, entry_id, verify_texts=None, settle=2.5):
     return True
 
 
+# ==================== 全量点位配置（照片/坐标/文字/流程/容错） ====================
+def load_points():
+    """读取 points.json（全量点位校准结果）。缺文件/损坏时返回空配置，不影响主流程。"""
+    try:
+        p = os.path.join(app_dir(), "points.json")
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def point_double_check(adb, point, settle=4.0):
+    """坐标定位 + 文字识别双重校验，返回 (是否成功, 界面文字, 说明)。
+
+    流程：scale_box 换算坐标 → ADB 点击 → 等待转场 → 截图 OCR →
+    目标文字是否出现。校验失败不盲目重复点击，交给上层按容错规则处理。
+    """
+    cfg = load_points()
+    if not isinstance(point, dict):
+        return False, "", "点位配置无效"
+    x, y = point.get("坐标") or (point.get("fallback") or (0, 0))
+    x, y = scale_box(adb, (int(x), int(y), 0, 0))[:2]
+    expect = point.get("验证文字") or point.get("verify") or []
+    if isinstance(expect, str):
+        expect = [expect]
+    if not x or not y:
+        return False, "", "点位坐标为空"
+    adb.tap(x, y)
+    time.sleep(settle)
+    img = adb.screenshot()
+    if img is None:
+        return False, "", "点击后截图失败（可能转场中）"
+    items = _au_ocr_all(img)
+    texts = [t for _, _, t, _ in items]
+    if not texts:
+        return False, "", "转场无文字（等 5 秒重截，不计失败）"
+    if expect and not any(any(k in t for t in texts) for k in expect):
+        return False, texts, f"坐标({x},{y})已点击但目标文字 {expect} 未出现"
+    return True, texts, f"坐标({x},{y}) + 文字校验通过"
+
+
+def _wait_after_click(seconds=4.0):
+    """统一点击后等待，避开游戏转场（实测转场期 OCR 会读到 0 条文字）。"""
+    time.sleep(seconds)
+
+
 # ==================== 命令 ====================
 def cmd_shot(adb):
     img = adb.screenshot()
@@ -1478,6 +1538,25 @@ def cmd_icons(adb):
     print(f"{C.DIM}如需覆盖某个入口，把设计基准 2310x1080 的中心坐标写进 "
           f"config.json 的 icon_entries.<入口ID>.fallback，或把裁好的图标放 refs/{C.R}")
     return rows
+
+
+def cmd_points():
+    """点位配置自检：打印 points.json 的双入口、标注点与资源文件是否齐全。"""
+    d = load_points()
+    if not d:
+        print(f"{C.ERR}points.json 缺失或损坏{C.R}")
+        return
+    print(f"{C.ACCENT}全量点位配置自检{C.R}  设备 {d.get('设备', '?')} / {d.get('分辨率', '?')}")
+    for key in ("task_panel", "activity"):
+        p = (d.get("关键入口") or {}).get(key) or {}
+        print(f"  {key:12} {p.get('名称', '?')} 坐标{p.get('坐标')} 验证文字{p.get('验证文字')}")
+    rows = d.get("点位") or []
+    print(f"  标注点位 {len(rows)} 个：活动标点 "
+          f"{sum(1 for p in rows if p.get('分类','').startswith('活动'))} / 有效 "
+          f"{sum(1 for p in rows if p.get('分类') == '有效点击点')} / 异常 "
+          f"{sum(1 for p in rows if p.get('分类','').startswith('异常'))}")
+    for k, rel in (d.get("资源文件") or {}).items():
+        print(f"  {k:12} {'OK' if os.path.isfile(os.path.join(app_dir(), rel)) else '缺失'}  {rel}")
 
 
 def cmd_scan(adb):
@@ -2539,7 +2618,7 @@ _MAIL_CAT_WORDS = ("联合体", "小队", "组织", "系统", "邮件", "收藏"
 _MAIL_CLAIM_KW = ("领取", "提取附件", "一键领取", "全部领取", "领取附件")
 
 # 任务面板（星图左上角「清单打勾」图标，无文字标签，只能靠坐标；实测 2310x1080）
-_TASK_ICON = (217, 55)      # 实机校准后的最后兜底；正常路径由 ICON_ONLY_ENTRIES.task_clipboard 模板命中
+_TASK_ICON = (77, 52)        # 任务面板星形徽记 #13 的最后兜底；正常路径由 ICON_ONLY_ENTRIES.task_panel_entry 模板命中
 _TASK_TABS = ("主线任务", "委托任务", "支线任务", "赏金任务", "集结")
 _TASK_CLOSE = (2100, 65)     # 任务面板右上角门形关闭图标（模板实测中心；与注册表 fallback 一致）
 _TASK_CLOSE_ALT = (2080, 43)  # 布局差异时的第二兜底
@@ -2549,7 +2628,7 @@ def _daily_claim_tasks(adb, qq):
     """任务面板：逐个页签点「一键领取」。这是每日奖励的大头（主线/委托/支线/赏金/集结）。
     按钮置灰时点击无害，所以不必判断颜色。返回点击次数。"""
     img0 = adb.screenshot()
-    hit = find_icon_entry(adb, img0, "task_clipboard")
+    hit = find_icon_entry(adb, img0, "task_panel_entry")
     if hit:
         x, y = hit[0], hit[1]
         log(f"任务入口由纯图标注册表定位 ({x},{y}) · {hit[2]}"
@@ -3102,9 +3181,13 @@ def main():
         banner()
         print(f"{C.ACCENT}config.json 路径:{C.R} {C.HL}{os.path.join(app_dir(), 'config.json')}{C.R}")
         return
+    if cmd == "points":
+        banner()
+        cmd_points()
+        return
 
     # 无参数 / 未知命令：只打印用法，不连 ADB（避免因设备不在线而白等）
-    _VALID_CMDS = ("check", "scan", "shot", "icons", "times", "status", "mark",
+    _VALID_CMDS = ("check", "scan", "shot", "icons", "points", "times", "status", "mark",
                    "tap", "autoup", "daily", "all")
     if cmd not in _VALID_CMDS:
         banner()
