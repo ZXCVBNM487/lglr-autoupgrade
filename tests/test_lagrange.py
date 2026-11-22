@@ -1127,6 +1127,19 @@ class TestFullPointCalibration(unittest.TestCase):
         self.assertIn("activity", d.get("关键入口", {}))
         self.assertEqual(d["关键入口"]["task_panel"]["坐标"], [53, 43])
 
+    def test_one_click_upgrade_is_first_priority(self):
+        import inspect
+        src = inspect.getsource(L._au_tap_upgrade)
+        first = src.find('find_button(')
+        self.assertIn('"一键升级"', src[first:first + 80])
+        self.assertIn('只走「一键升级」', src)
+
+    def test_one_click_upgrade_in_points(self):
+        d = L.load_points()
+        ocu = (d.get('关键入口') or {}).get('one_click_upgrade') or {}
+        self.assertEqual(ocu.get('坐标'), [359, 608])
+        self.assertIn('一键升级', ocu.get('验证文字', []))
+
     def test_double_check_transparency(self):
         import numpy as np
         from unittest import mock

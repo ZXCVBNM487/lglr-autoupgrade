@@ -2361,14 +2361,20 @@ def _au_skip_reached(adb, items):
 
 
 def _au_tap_upgrade(adb, qq, items):
-    """在建筑详情面板里点『升至满级/连续升级设置』发起（连续）升级。
-    返回 True 表示已处理（点了/资源不足/队列已满），False 表示面板里没找到升级按钮。"""
-    btn = find_button(items, ["升至满级", "连续升级设置"], min_score=0.5)
+    """在建筑详情面板里点游戏内的【一键升级】按钮发起升级。
+
+    用户要求：autoup 升级循环只走「一键升级」这条路线。
+    优先级：一键升级 > 升至满级/连续升级设置 > 普通升级（排除词过滤）。
+    返回 True 表示已处理（点了/资源不足/队列已满），False 表示面板里没找到升级按钮。
+    """
+    btn = find_button(items, ["一键升级"], min_score=0.5)
+    if btn is None:
+        btn = find_button(items, ["升至满级", "连续升级设置"], min_score=0.5)
     if btn is None:
         btn = find_button(items, ["升级"], exclude=_AU_UPGRADE_BTN_EXCLUDE, min_score=0.5)
     if btn is None:
         return False
-    log(f"点击升级入口 ({btn[0]},{btn[1]})", "ok")
+    log(f"点击一键升级 ({btn[0]},{btn[1]})", "ok")
     adb.tap(*btn)
     time.sleep(2.5)
 
