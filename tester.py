@@ -165,6 +165,42 @@ if "--cli" in sys.argv:
 
 
 # ==================== 路径工具 ====================
+def eta_display(slot, now=None, updated_at=None):
+    """纯函数：把 state.json 的一条倒计时换算成 (显示文字, 是否活跃)。
+
+    供 GUI 倒计时条使用，也便于单测覆盖各种边界（过期 / 陈旧 / 坏数据）。
+    slot: {"sec":秒, "at":"写入时刻", "name":建筑名}
+    返回 ("--:--:--" | "HH:MM:SS" | "已完成 ✓" | "数据已过期", bool 活跃)
+    """
+    def _parse(s):
+        try:
+            return time.mktime(time.strptime(str(s), "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return None
+    slot = slot if isinstance(slot, dict) else {}
+    now = time.time() if now is None else now
+    try:
+        sec = int(slot.get("sec"))
+    except Exception:
+        return "--:--:--", False
+    base = _parse(slot.get("at"))
+    if base is None:
+        return "--:--:--", False
+    # 关键（2026-11-23 bug 修复）：不能用「距上次写入时间」判陈旧！
+    # 脚本静默等待 1 小时不写文件是正常行为，那时 upgrade_at 已过 10 分钟，
+    # 若据此判「数据已过期」会把正常长倒计时误报掉。
+    # 正确语义：at 时刻读到还剩 sec 秒 → 完成时刻 = at + sec。
+    #   还没到完成时刻 → 倒计时有效（无论 at 多久以前）；
+    #   刚过完成时刻 10 分钟内 → 已完成；超过 10 分钟 → 数据已过期。
+    remain = sec - (now - base)
+    if remain > 0:
+        h, m, s = int(remain) // 3600, (int(remain) % 3600) // 60, int(remain) % 60
+        return f"{h:02d}:{m:02d}:{s:02d}", True
+    if remain > -600:
+        return "已完成 ✓", False
+    return "数据已过期", False
+
+
 def app_dir():
     """exe 或脚本所在目录。"""
     if getattr(sys, "frozen", False):
@@ -735,6 +771,30 @@ def run_gui():
 
     perf_cb.bind("<<ComboboxSelected>>", _on_perf_change)
 
+    # ========== 底部实时升级倒计时条（两条并排，始终可见） ==========
+    # 数据来自 state.json 的 upgrade_etas（升级循环每轮写入），GUI 定时读取并按
+    # at+sec 本地逐秒递减，脚本静默等待期间倒计时也能实时走动。
+    eta_bar = tk.Frame(root, bg=BG_PANEL, highlightthickness=1,
+                       highlightbackground="#333b45")
+    # 先 pack 的贴底、后 pack 的 status 会排在它下面 → 倒计时条位于状态栏上方。
+    eta_bar.pack(fill="x", side="bottom")
+    tk.Label(eta_bar, text="升级倒计时", bg=BG_PANEL, fg=FG_DIM,
+             font=FONT_SM, width=10, anchor="w").pack(side="left", padx=(12, 4), pady=4)
+    eta_slots = []
+    for _ in range(2):
+        _f = tk.Frame(eta_bar, bg=BG_LOG, padx=8, pady=3)
+        _f.pack(side="left", fill="x", expand=True, padx=(4, 4), pady=4)
+        _name = tk.Label(_f, text="—", bg=BG_LOG, fg=FG_DIM,
+                         font=("Microsoft YaHei UI", 9), anchor="w")
+        _name.pack(side="left")
+        _time = tk.Label(_f, text="--:--:--", bg=BG_LOG, fg=FG_DIM,
+                         font=("Consolas", 12, "bold"), anchor="e")
+        _time.pack(side="right")
+        eta_slots.append((_name, _time))
+    eta_dot = tk.Label(eta_bar, text="●", bg=BG_PANEL, fg="#5a636f",
+                       font=("Consolas", 9))
+    eta_dot.pack(side="right", padx=(4, 12))
+
     # ========== 底部状态栏（先占位，避免被主体挤掉） ==========
     status = tk.Frame(root, bg=BG_PANEL)
     status.pack(fill="x", side="bottom")
@@ -749,9 +809,35 @@ def run_gui():
     body = tk.Frame(root, bg=BG)
     body.pack(fill="both", expand=True, padx=14, pady=(0, 6))
 
-    left = tk.Frame(body, bg=BG, width=300)
-    left.pack(side="left", fill="y")
-    left.pack_propagate(False)
+    # 左侧功能区可上下滚动：低分辨率/窄窗口下底部「控制」按钮不再被裁掉
+    left_outer = tk.Frame(body, bg=BG, width=300)
+    left_outer.pack(side="left", fill="y")
+    left_outer.pack_propagate(False)
+    left_canvas = tk.Canvas(left_outer, bg=BG, highlightthickness=0, width=282)
+    left_scroll = tk.Scrollbar(left_outer, orient="vertical",
+                               command=left_canvas.yview,
+                               bg=BG_PANEL, troughcolor=BG, width=10)
+    left_canvas.pack(side="left", fill="both", expand=True)
+    left_scroll.pack(side="right", fill="y")
+    left_canvas.configure(yscrollcommand=left_scroll.set)
+    left = tk.Frame(left_canvas, bg=BG)
+    left_win = left_canvas.create_window((0, 0), window=left, anchor="nw")
+    left.bind("<Configure>",
+              lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
+    left_canvas.bind("<Configure>",
+                     lambda e: left_canvas.itemconfigure(left_win, width=e.width))
+
+    def _left_wheel(event):
+        left_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _bind_wheel(widget):
+        widget.bind("<MouseWheel>", _left_wheel)
+        for child in widget.winfo_children():
+            _bind_wheel(child)
+
+    left.after(120, lambda: _bind_wheel(left))
+
     right = tk.Frame(body, bg=BG)
     right.pack(side="right", fill="both", expand=True, padx=(10, 0))
 
@@ -984,6 +1070,35 @@ def run_gui():
 
         start_cmd("check", "检查 adb / 设备 / 分辨率", False, step2)
 
+    # ==================== 底部实时升级倒计时 ====================
+    def _refresh_etas():
+        """读 state.json 的 upgrade_etas，按写入时刻 + 秒数本地逐秒递减。
+        脚本静默等待时不写文件，GUI 自己走时；脚本每轮更新会重置基准。"""
+        try:
+            with open(os.path.join(BASE_DIR, "state.json"), encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        slots = d.get("upgrade_etas") if isinstance(d, dict) else None
+        if not isinstance(slots, list):
+            slots = []
+        updated_at = d.get("upgrade_at") if isinstance(d, dict) else None
+        now = time.time()
+        any_active = False
+        for i, (_name, _time) in enumerate(eta_slots):
+            if i >= len(slots):
+                _name.configure(text="—")
+                _time.configure(text="--:--:--", fg=FG_DIM)
+                continue
+            slot = slots[i] if isinstance(slots[i], dict) else {}
+            name = str(slot.get("name") or "").strip()
+            _name.configure(text=name[:12] if name else f"队列 {i + 1}")
+            text, active = eta_display(slot, now=now, updated_at=updated_at)
+            any_active = any_active or active
+            _time.configure(text=text, fg=(OK if active else FG_DIM))
+        eta_dot.configure(fg=OK if any_active else "#5a636f")
+        root.after(1000, _refresh_etas)
+
     # ==================== 队列轮询 ====================
     def pump():
         try:
@@ -1081,6 +1196,7 @@ def run_gui():
     root.after(400, _refresh_devices)   # 窗口先显示，再查在线设备（避免拖慢启动）
     root.after(perf_state["poll_ms"], pump)
     root.after(600, load_preview)   # 目录里有上次的截图就先显示出来
+    root.after(300, _refresh_etas)  # 底部两条实时升级倒计时（每秒本地走时）
     root.mainloop()
 
 

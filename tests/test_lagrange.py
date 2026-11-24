@@ -987,19 +987,14 @@ class TestNetworkAdbReconnect(unittest.TestCase):
 
 
 class TestTaskCloseTemplate(unittest.TestCase):
-    """任务面板关闭改为纯图标模板识别（原先只有写死坐标）。"""
+    """2026-11-23：旧门形图标模板会误命中展开键，改走展开/收起坐标。"""
 
-    def test_registry_has_template(self):
+    def test_registry_uses_expand_fallback(self):
         c = L.ICON_ONLY_ENTRIES["task_close"]
-        self.assertEqual(c["template"], "icon_task_close.png")
+        self.assertIsNone(c["template"])
         self.assertEqual(c["fallback"], L._TASK_CLOSE)
-        self.assertGreaterEqual(c["threshold"], 0.6)
+        self.assertEqual(L._TASK_CLOSE, (2194, 54))
         self.assertFalse(c.get("forbidden", False))
-
-    def test_template_file_exists(self):
-        import os
-        p = os.path.join(os.path.dirname(L.__file__), "refs", "icon_task_close.png")
-        self.assertTrue(os.path.isfile(p))
 
     def test_close_helper_exists(self):
         self.assertTrue(callable(L._daily_tap_task_close))
@@ -1151,6 +1146,355 @@ class TestFullPointCalibration(unittest.TestCase):
                 fake, {"坐标": [53, 43], "验证文字": ["主线任务"]})
         self.assertFalse(ok)
         self.assertIn("转场", msg)
+
+
+    # ===== 2026-11-23 复核新增：坐标基准 / 文字解析 / 一键升级唯一路线 =====
+    def test_point_design_xy_prefers_design(self):
+        self.assertEqual(
+            L.point_design_xy({"坐标": [150, 43], "设计坐标": [217, 55]}), (217, 55))
+
+    def test_point_design_xy_converts_device_pixels(self):
+        cfg = {"分辨率": [1600, 900]}
+        self.assertEqual(
+            L.point_design_xy({"坐标": [53, 43]}, cfg), (77, 52))
+        self.assertEqual(
+            L.point_design_xy({"坐标": [292, 719]}, cfg), (422, 863))
+
+    def test_point_expect_texts_splits_legacy_field(self):
+        self.assertEqual(
+            L.point_expect_texts({"目标文字": "主线任务/委托任务、支线任务"}),
+            ["主线任务", "委托任务", "支线任务"])
+
+    def test_point_double_check_taps_scaled_design_coordinate(self):
+        import numpy as np
+        from unittest import mock
+        fake = _FakeAdb(1600, 900)
+        tapped = []
+        fake.tap = lambda x, y: tapped.append((x, y))
+        fake.screenshot = lambda: np.zeros((100, 100, 3), dtype="uint8")
+        with mock.patch.object(L, "_au_ocr_all", return_value=[(10, 10, "主线任务", 0.9)]):
+            ok, _, msg = L.point_double_check(
+                fake, {"设计坐标": [77, 52], "验证文字": ["主线任务"]})
+        self.assertTrue(ok)
+        self.assertEqual(tapped, [(53, 43)])
+        self.assertIn("文字校验通过", msg)
+
+    def test_one_click_upgrade_has_no_fallback(self):
+        import inspect
+        src = inspect.getsource(L._au_tap_upgrade)
+        self.assertNotIn('find_button(items, ["升级"]', src)
+        self.assertNotIn('find_button(items, ["升至满级"', src)
+        self.assertNotIn("exclude=_AU_UPGRADE_BTN_EXCLUDE", src)
+
+    def test_points_activity_coordinate_fixed(self):
+        d = L.load_points()
+        e = d["关键入口"]["activity"]
+        self.assertEqual(e["坐标"], [150, 46])
+        self.assertEqual(e["设计坐标"], [217, 55])
+
+    def test_points_all_have_consistent_design_coordinates(self):
+        d = L.load_points()
+        bw, bh = d.get("分辨率", [1600, 900])
+        for p in d.get("点位", []):
+            with self.subTest(p.get("序号")):
+                design = L.point_design_xy(p, d)
+                self.assertIsNotNone(design)
+                self.assertEqual(
+                    p.get("设计坐标"), list(design),
+                    f"#{p.get('序号')} 设计坐标与实机坐标不一致")
+                self.assertEqual(
+                    [round(design[0] * bw / 2310), round(design[1] * bh / 1080)],
+                    list(p["坐标"]))
+
+
+    # ===== 2026-11-23 升级循环定稿 =====
+    def test_autoup_loop_uses_only_global_one_click(self):
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        self.assertNotIn("_au_open_target(", src)
+        self.assertNotIn("_au_tap_upgrade(", src)
+        self.assertIn("_AU_LAST_CLICK_TS", src)
+        self.assertIn("_AU_WAIT_SIGNATURE", src)
+
+    def test_queue_full_only_exact_two_slash_two(self):
+        fake = _FakeAdb(1600, 900)
+        self.assertFalse(L._au_queue_full([(500, 860, "4/4", 0.9)], fake))
+        self.assertFalse(L._au_queue_full([(500, 860, "5/5", 0.9)], fake))
+        self.assertTrue(L._au_queue_full([(500, 860, "2/2", 0.9)], fake))
+
+
+class TestAutoUpEnterBaseListView(unittest.TestCase):
+    """2026-11-23 实机修复：3D 全景视图右上 (1946,67) 是「分享」按钮，
+    盲点坐标会误开分享面板。必须先「点进基地建设」展开建筑列表视图，
+    OCR 明确读到「一键升级」文字才点；只有列表视图内才允许坐标兜底。"""
+
+    def test_constants_scale_back_to_device_pixels(self):
+        self.assertEqual(L._AU_BASE_LIST_ENTRY, (1156, 988))
+        self.assertEqual(L._AU_SHARE_CLOSE_BTN, (2194, 54))
+        self.assertIn("小红书", L._AU_SHARE_PANEL_KEYS)
+        a = _FakeAdb(1600, 900)
+        bx, by = L.scale_box(a, (*L._AU_BASE_LIST_ENTRY, 0, 0))[:2]
+        self.assertAlmostEqual(bx, 801, delta=2)   # 实机 (801,823) 底部「基地建设」标签
+        self.assertAlmostEqual(by, 823, delta=2)
+        cx, cy = L.scale_box(a, (*L._AU_SHARE_CLOSE_BTN, 0, 0))[:2]
+        self.assertAlmostEqual(cx, 1520, delta=2)  # 实机 (1520,45) 分享面板右上 X
+        self.assertAlmostEqual(cy, 45, delta=2)
+        ux, uy = L.scale_box(a, (*L._AU_GLOBAL_UPGRADE_BTN, 0, 0))[:2]
+        self.assertAlmostEqual(ux, 1348, delta=2)  # 实机 (1348,56) 折叠视图一键升级按钮
+        self.assertAlmostEqual(uy, 56, delta=2)
+
+    def test_list_view_vs_panorama_view(self):
+        a = _FakeAdb(1600, 900)
+        # 建筑列表视图：左上 y≈57 有标题，中部 y≈578 有分区标题
+        lv = [(129, 57, "基地建设", 0.8), (309, 578, "中央区", 0.8),
+              (746, 579, "港区", 0.8), (1207, 577, "工业区", 0.8),
+              (1351, 56, "一键升级", 0.71)]
+        self.assertTrue(L._au_base_list_view(lv, a))
+        # 3D 全景视图：标题与分区全在底部 y≈823~842
+        pv = [(801, 823, "基地建设", 0.8), (1019, 841, "中央区", 0.8),
+              (1162, 842, "港区", 0.8), (82, 856, "返回地图", 0.8)]
+        self.assertFalse(L._au_base_list_view(pv, a))
+        self.assertFalse(L._au_base_list_view([], a))
+
+    def test_no_blind_coordinate_tap_in_panorama(self):
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        # 旧的「OCR 未读到就直接点右上坐标」必须已删除
+        self.assertNotIn('OCR 未读到「一键升级」，用已校准的右上按钮坐标', src)
+        # 新流程：读不到按钮先点进基地建设；坐标兜底只在列表视图内
+        self.assertIn("先点进基地建设展开列表", src)
+        self.assertIn("_au_base_list_view(items, adb)", src)
+        self.assertIn("_AU_BASE_LIST_ENTRY", src)
+        # 分享面板有识别与关闭
+        self.assertIn("_AU_SHARE_PANEL_KEYS", src)
+        self.assertIn("_AU_SHARE_CLOSE_BTN", src)
+
+    def test_share_panel_keyword_does_not_hit_base_page(self):
+        share = [(1359, 837, "小红书", 0.75), (1220, 61, "艾星际猎人", 0.64)]
+        self.assertTrue(any(k in t for _, _, t, _ in share
+                            for k in L._AU_SHARE_PANEL_KEYS))
+        base = [(801, 823, "基地建设", 0.8), (1351, 56, "一键升级", 0.71),
+                (1019, 841, "中央区", 0.8)]
+        self.assertFalse(any(k in t for _, _, t, _ in base
+                             for k in L._AU_SHARE_PANEL_KEYS))
+
+    def test_panel_does_not_prediction_wait_for_resources(self):
+        """2026-11-23 实机：消耗资源是「本次消耗/当前拥有」，旧预判反着理解，
+        导致点开一键升级面板后长等 3 小时、从不去点升级按钮。现在直接点升级。"""
+        import inspect
+        src = inspect.getsource(L._au_handle_panel)
+        self.assertNotIn("资源不足，预估", src)
+        self.assertNotIn("lack", src)
+        self.assertNotIn("_AU_RES_RE", src)
+        self.assertIn("点击一键升级面板的升级按钮", src)
+        self.assertIn("_AU_LAST_CLICK_TS", src)
+
+    def test_collapse_back_to_panorama_after_click(self):
+        """点完升级必须收起建筑列表回 3D 全景视图，否则读不到两条队列倒计时会反复点。"""
+        import inspect
+        self.assertEqual(L._AU_BASE_COLLAPSE_BTN, (2180, 66))
+        a = _FakeAdb(1600, 900)
+        cx, cy = L.scale_box(a, (*L._AU_BASE_COLLAPSE_BTN, 0, 0))[:2]
+        self.assertAlmostEqual(cx, 1510, delta=2)   # 实机折叠图标 (1510,55)
+        self.assertAlmostEqual(cy, 55, delta=2)
+        self.assertIn("_au_back_to_panorama(adb)",
+                      inspect.getsource(L._au_handle_panel))
+        # 非列表视图时不点击，避免误点右上分享区
+        fake = _FakeAdb(1600, 900)
+        L._au_back_to_panorama(fake)
+        self.assertFalse(any(c[0] == "tap" for c in fake.calls))
+
+
+class TestEtaDisplayEdgeCases(unittest.TestCase):
+    """GUI 底部倒计时的递减纯函数：覆盖过期/陈旧/坏数据等边界，防 bug。"""
+
+    def setUp(self):
+        import tester
+        self.eta = tester.eta_display
+
+    def _at(self, offset):
+        import time
+        return time.strftime("%Y-%m-%d %H:%M:%S",
+                             time.localtime(time.time() + offset))
+
+    def test_normal_countdown(self):
+        text, active = self.eta({"sec": 9000, "at": self._at(-10)})
+        self.assertTrue(active)
+        self.assertTrue(text.startswith("02:29:"), text)
+
+    def test_expired_shows_done_not_zero(self):
+        # bug 修复：过期不再卡 00:00:00，显示"已完成"
+        text, active = self.eta({"sec": 60, "at": self._at(-120)})
+        self.assertEqual(text, "已完成 ✓")
+        self.assertFalse(active)
+
+    def test_stale_data_shows_expired(self):
+        # 完成时刻已过超 10 分钟 → 数据已过期
+        text, active = self.eta({"sec": 60, "at": self._at(-1200)})
+        self.assertEqual(text, "数据已过期")
+        self.assertFalse(active)
+
+    def test_long_countdown_not_false_expired(self):
+        """核心 bug 修复：脚本静默等待 1 小时不写文件，长倒计时不能误报过期。
+        完成时刻 = at + sec，只要没到就有效，与距上次写入多久无关。"""
+        # 2 小时前读到还剩 3 小时 → 现在还有 1 小时，必须仍活跃
+        text, active = self.eta({"sec": 10800, "at": self._at(-7200)},
+                                updated_at=self._at(-7200))
+        self.assertTrue(active, text)
+        self.assertTrue(text.startswith("00:59:"), text)
+
+    def test_bad_data_safe(self):
+        for slot in ({}, {"sec": None, "at": "x"}, {"sec": 9000, "at": "bad-time"},
+                     {"sec": "abc", "at": self._at(0)}, None):
+            with self.subTest(slot=slot):
+                text, active = self.eta(slot)
+                self.assertEqual(text, "--:--:--")
+                self.assertFalse(active)
+
+    def test_five_minutes_still_active(self):
+        text, active = self.eta({"sec": 300, "at": self._at(-1)})
+        self.assertTrue(active)
+        self.assertTrue(text.startswith("00:04:"), text)
+
+
+class TestUpgradeEtaPublish(unittest.TestCase):
+    """GUI 底部实时倒计时条的数据源：state.json.upgrade_etas。"""
+
+    def test_publish_writes_two_slots_without_losing_fields(self):
+        import json, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"last_daily": "2026-11-23", "last_device": "dev1"}, f)
+            orig = L._state_file
+            L._state_file = lambda: p
+            try:
+                L._publish_upgrade_etas([7240, 2022], ["通用港口4", "金属炼化"], 2)
+                with open(p, encoding="utf-8") as f:
+                    st = json.load(f)
+                self.assertEqual(st["last_daily"], "2026-11-23")
+                self.assertEqual(st["last_device"], "dev1")
+                self.assertEqual(st["upgrade_count"], 2)
+                self.assertEqual(len(st["upgrade_etas"]), 2)
+                self.assertEqual(st["upgrade_etas"][0]["sec"], 7240)
+                self.assertEqual(st["upgrade_etas"][0]["name"], "通用港口4")
+                self.assertTrue(st["upgrade_etas"][0]["at"])
+            finally:
+                L._state_file = orig
+
+    def test_publish_empty_clears_slots(self):
+        import json, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            orig = L._state_file
+            L._state_file = lambda: p
+            try:
+                L._publish_upgrade_etas([], [], 0)
+                with open(p, encoding="utf-8") as f:
+                    st = json.load(f)
+                self.assertEqual(st["upgrade_etas"], [])
+                self.assertEqual(st["upgrade_count"], 0)
+            finally:
+                L._state_file = orig
+
+    def test_loop_publishes_etas(self):
+        import inspect
+        self.assertIn("_publish_upgrade_etas(", inspect.getsource(L.cmd_autoup))
+
+
+class TestUpgradeStateFirstLook(unittest.TestCase):
+    """2026-11-23 用户定稿：循环第一时间数出几个在升级，2个等待/1个补位/0个升级。"""
+
+    def setUp(self):
+        self.adb = _FakeAdb(1600, 900)
+
+    def test_two_upgrading(self):
+        # 用户截图：2/2 + 两条倒计时
+        items = [(801, 853, "2/2", 0.8), (1086, 852, "02:00:40", 0.83),
+                 (1265, 852, "00:33:42", 0.87), (1089, 831, "通用港口4", 0.77)]
+        self.assertEqual(L._au_upgrade_state(items, self.adb), (2, [7240, 2022], True))
+
+    def test_one_upgrading(self):
+        # 1/2 + 一条倒计时 → 1 个在升级
+        items = [(801, 853, "1/2", 0.8), (1086, 852, "00:20:27", 0.8)]
+        count, times, readable = L._au_upgrade_state(items, self.adb)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(times), 1)
+        self.assertTrue(readable)
+
+    def test_zero_upgrading(self):
+        # 0/2 无倒计时 → 明确空队列
+        items = [(801, 853, "0/2", 0.8)]
+        count, times, readable = L._au_upgrade_state(items, self.adb)
+        self.assertEqual(count, 0)
+        self.assertTrue(readable)
+
+    def test_unreadable_not_treated_as_empty(self):
+        # 建筑列表视图（只有建筑卡等级）没有队列条 → readable=False，绝不能当空位空转
+        items = [(386, 635, "前哨站指挥中心", 0.8), (1022, 635, "2/4", 0.8),
+                 (1022, 702, "4/4", 0.8)]
+        count, times, readable = L._au_upgrade_state(items, self.adb)
+        self.assertFalse(readable)
+        self.assertEqual(times, [])
+
+    def test_loop_uses_upgrade_state(self):
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        self.assertIn("_au_upgrade_state(items, adb)", src)
+        self.assertIn("2 个建筑都在升级", src)
+        self.assertIn("1 个建筑在升级", src)
+        # 死循环根因「30 秒复查空转」必须已移除
+        self.assertNotIn("一键升级面板未打开，30 秒后复查", src)
+
+
+class TestEventBannerPopup(unittest.TestCase):
+    """2026-11-23 用户截图：暗流汹涌 / 新章节开启 / 前往查看 活动弹窗。"""
+
+    def test_recognizes_real_screenshot_ocr(self):
+        # 用户截图 664x372 的真实 OCR：汹涌被读成「凶涌」
+        real = [(332, 176, "暗流凶涌", 0.65), (332, 206, "新章节开启", 0.83),
+                (332, 309, "前往查看", 0.63)]
+        self.assertTrue(L._au_has_event_banner(real))
+        good = [(332, 176, "暗流汹涌", 0.9), (332, 309, "前往查看", 0.9)]
+        self.assertTrue(L._au_has_event_banner(good))
+
+    def test_does_not_mistake_ordinary_screen(self):
+        # 没有「前往查看」的普通界面 → 不误判
+        self.assertFalse(L._au_has_event_banner([(332, 176, "暗流凶涌", 0.9)]))
+        self.assertFalse(L._au_has_event_banner([(87, 857, "基地", 0.8)]))
+        self.assertFalse(L._au_has_event_banner([]))
+
+    def test_does_not_use_title_or_subtitle(self):
+        """用户定稿：不识别主题，只认弹窗自身的「前往查看」按钮。
+        标题 / 副标题怎么变都无所谓，有无「前往查看」是唯一判据。"""
+        # 三个不同标题的实机弹窗，只要带「前往查看」都应识别
+        for title, sub in (("暗流凶涌", "新章节开启"),
+                           ("危机-防御劫掠者战役", "态势达成"),
+                           ("反攻时机", "新章节开启"),
+                           ("资产技术成果展销", "展销剩余时间")):
+            with self.subTest(title=title):
+                items = [(500, 280, title, 0.9), (600, 330, sub, 0.8),
+                         (802, 737, "前往查看", 0.8)]
+                self.assertTrue(L._au_has_event_banner(items))
+        # 光有标题没有任何按钮 → 不识别
+        self.assertFalse(L._au_has_event_banner([(500, 280, "暗流汹涌", 0.9)]))
+
+    def test_close_uses_x_not_cta(self):
+        import inspect
+        src = inspect.getsource(L._au_close_event_banner)
+        self.assertIn("find_close_x", src)
+        self.assertIn("close_x", src)
+        # 兜底坐标 close_x (2195,70) 换算回实机应与截图右上 X ≈(1513,53) 接近
+        a = _FakeAdb(1600, 900)
+        x, y = L.scale_box(a, (*L.ICON_ONLY_ENTRIES["close_x"]["fallback"], 0, 0))[:2]
+        self.assertAlmostEqual(x, 1513, delta=12)
+        self.assertAlmostEqual(y, 53, delta=12)
+
+    def test_wired_into_autoup_and_daily(self):
+        import inspect
+        self.assertIn("_au_has_event_banner(items)", inspect.getsource(L.cmd_autoup))
+        self.assertIn("_au_has_event_banner(items)",
+                      inspect.getsource(L._daily_ensure_starmap))
 
 
 if __name__ == "__main__":

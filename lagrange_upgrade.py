@@ -1304,14 +1304,16 @@ ICON_ONLY_ENTRIES = {
                 "2026-11-22 实机：活动面板 X (1522,56)、战报面板 X (1525,61) @1600x900 → 设计基准 (2195,70)",
     },
     "task_close": {
-        "name": "任务面板关闭（门形图标）",
-        "template": "icon_task_close.png",
+        "name": "任务面板返回星图（右上展开/收起键）",
+        # 2026-11-23 终版复核：当前游戏任务面板没有门形 X，旧 icon_task_close.png
+        # 会误命中右上的展开/收起图标并导致「关闭残留任务面板」死循环。
+        # 实机点击 (1520,45)@1600x900 可稳定退回星图，故停用模板，直接走设计坐标兜底。
+        "template": None,
         "search": (DESIGN_W - 350, 0, DESIGN_W, 140),
-        "fallback": (2100, 65),
+        "fallback": (2194, 54),
         "threshold": 0.66,
         "scales": (0.55, 0.7, 0.85, 1.0, 1.2, 1.45),
-        "note": "2026-11-22 从历史任务面板截图裁模板：task.png / task_wt.png 命中 (2100,65)@1.00，"
-                "星图与实机星图均不误命中；旧 (2143,66) / 真机 (2080,43) 仅作布局差异兜底",
+        "note": "历史门形图标模板已停用；现版本用右上展开/收起键 (1520,45)@1600x900 → 设计 (2194,54)",
     },
     "live_widget": {
         "name": "基地建设页右上直播挂件",
@@ -1886,7 +1888,25 @@ def fmt_duration(sec):
 # 设计原则：读倒计时 → 纯 sleep 零占用等待 → 到点补位，队列永远满载（先到先补）
 
 _AU_PANEL_KEYS = ("填满建造队列", "消耗资源")          # 面板打开的特征文本
-_AU_RES_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(万)?\s*/\s*(\d+(?:\.\d+)?)\s*(万)?")
+# 基地建设【建筑列表视图】右上「一键升级」按钮（实机 (1345,55)@1600x900 → 设计 (1946,67)）。
+# 2026-11-23 实测：点它打开列出全部可升级建筑的面板（含各自倒计时）。
+# 硬约束：这个坐标【只在建筑列表视图】有效！3D 全景视图同位置 (1345,50) 是【分享按钮】，
+# 盲点会弹出分享面板（二维码 / 小红书），脚本此前就是这样误点的。
+# 因此必须先 OCR 读到「一键升级」文字；读不到要先点进基地建设展开列表视图，绝不直接点坐标。
+_AU_GLOBAL_UPGRADE_BTN = (1946, 67)
+# 底部「基地建设」标签（实机 (801,823)@1600x900 → 设计 (1156,988)）：
+# 3D 全景视图里点它会展开成建筑列表视图，右上角才出现「一键升级」按钮（转场约 4~7 秒）。
+_AU_BASE_LIST_ENTRY = (1156, 988)
+# 建筑列表视图右上「折叠/收起」图标（实机 (1510,55) → 设计 (2180,66)）：
+# 点它回到 3D 全景视图，底部才显示建造队列条（两条倒计时 + 2/2）。
+# 不收起就会一直读不到队列倒计时，主循环误判「有空位」而反复点一键升级。
+_AU_BASE_COLLAPSE_BTN = (2180, 66)
+# 误开的分享面板特征文字 + 右上 X（实机 (1520,45) → 设计 (2194,54)）
+_AU_SHARE_PANEL_KEYS = ("小红书", "朋友圈", "分享给好友", "保存到相册", "二维码分享")
+_AU_SHARE_CLOSE_BTN = (2194, 54)
+
+# 注：旧版用 _AU_RES_RE 解析「消耗资源」做资源预判，2026-11-23 实测发现语义相反
+# （前=本次消耗、后=当前拥有），会误判不足并长等 3 小时，已移除该预判，不再保留正则。
 
 
 def _au_ocr_all(img):
@@ -1976,6 +1996,11 @@ _AU_UPGRADE_BTN_EXCLUDE = ["一键升级", "可升级", "升级中", "立即升�
 # 注：基地建设页右上 (1879~1915, 67~69) 是【直播挂件】而非「一键升级」按钮，
 # 点它会陷入死循环（见项目硬约束）。禁止再把该坐标用作点击兜底。
 _AU_STRAY_MODAL_KEYS = ("扩建规模", "扩建条件", "基地扩建")  # 误开的遮挡弹窗关键词
+# 活动弹窗（暗流汹涌 / 危机-防御劫掠者战役 / 反攻时机 / 资产技术成果展销…）：
+# 整屏遮罩 + 中央大标题 + 下方「前往查看」按钮 + 右上 X。
+# 用户定稿（2026-11-23）：【不识别主题】——标题每次都不一样，只认弹窗自身的
+# 「前往查看」按钮特征，出现就点右上 X 关掉。不靠任何标题 / 副标题文字。
+_AU_EVENT_BANNER_CTA = "前往查看"
 
 
 def _au_guard_exit(adb, items):
@@ -1991,6 +2016,30 @@ def _au_guard_exit(adb, items):
         time.sleep(2)
         return True
     return False
+
+
+def _au_has_event_banner(items):
+    """是否弹出这类活动弹窗——按用户定稿【不识别主题】，只认弹窗自身的
+    「前往查看」按钮：整屏遮罩弹窗都有它，出现即判定并点右上 X 关闭。
+
+    标题每次都不同（暗流汹涌 / 危机-防御劫掠者战役 / 反攻时机 / 资产技术成果展销…），
+    所以完全不用标题 / 副标题文字判定，避免换个活动就漏判。
+    """
+    texts = [str(t) for _, _, t, _ in items or []]
+    return any(_AU_EVENT_BANNER_CTA in t for t in texts)
+
+
+def _au_close_event_banner(adb, img):
+    """关闭活动弹窗：优先右上 X 模板（限定上半屏），兜底 close_x 注册表坐标。
+    绝不点「前往查看」，避免跳进活动页打断自动升级 / 日常。"""
+    pos = find_close_x(adb, img,
+                       search=(0, 0, adb.w, scale_box(adb, (0, 0, 0, 320))[3]))
+    if pos is None:
+        pos = scale_box(adb, (*ICON_ONLY_ENTRIES["close_x"]["fallback"], 0, 0))[:2]
+        log("活动弹窗 X 未模板命中，用 close_x 注册表兜底坐标", "warn")
+    adb.tap(*pos)
+    time.sleep(2)
+    return pos
 
 
 # ============ 前台/亮屏守护 + 资源读数（挂机可靠性增强） ============
@@ -2176,6 +2225,33 @@ def _mark_daily_done():
     _save_state(st)
 
 
+def _publish_upgrade_etas(times, names=None, count=None):
+    """把当前两条升级倒计时写进 state.json，供 GUI 底部倒计时条实时显示。
+
+    times: 倒计时秒数列表（最多取 2 条）；names: 对应建筑名（可选）；
+    count: 正在升级的数量（可选，缺省按 len(times)）。
+    结构：upgrade_etas = [{"sec":秒, "name":名, "at":写入时刻}, ...]
+    GUI 读取后用 at + sec 本地逐秒递减，即使脚本在静默等待也能实时走动。
+    空列表表示当前没有在升级，GUI 会清空显示。
+    """
+    try:
+        st = _load_state()
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        slots = []
+        for i, sec in enumerate(list(times or [])[:2]):
+            slots.append({
+                "sec": int(sec),
+                "name": str((names or [])[i]) if names and i < len(names) else "",
+                "at": now,
+            })
+        st["upgrade_etas"] = slots
+        st["upgrade_count"] = int(count) if count is not None else len(slots)
+        st["upgrade_at"] = now
+        _save_state(st)
+    except Exception as e:
+        log(f"写入升级倒计时到 state.json 失败：{e}", "warn")
+
+
 def _au_close_panel(adb):
     """关闭建筑详情面板：优先图标模板找 X；否则点面板外空白区（建筑详情是左侧抽屉，
     点右侧基地视图即收起，回到星图）。关闭后验证面板已收起，否则再点一次外侧。"""
@@ -2197,30 +2273,43 @@ def _au_close_panel(adb):
         time.sleep(1.5)
 
 
+def _au_back_to_panorama(adb):
+    """点完一键升级后收起【建筑列表视图】→ 回到 3D 全景视图。
+
+    建造队列条（两条倒计时 + 2/2）只在 3D 全景视图底部；停在建筑列表视图
+    会读不到队列倒计时，主循环误判「有空位」而反复点一键升级（2026-11-23 实测）。
+    收起前先确认当前确实是列表视图，避免在全景视图里误点右上空白/分享区。
+    """
+    img = adb.screenshot()
+    items = _au_ocr_all(img) if img is not None else []
+    if not _au_base_list_view(items, adb):
+        log("已不在建筑列表视图，无需收起", "info")
+        return
+    adb.tap(*scale_box(adb, (*_AU_BASE_COLLAPSE_BTN, 0, 0))[:2])
+    time.sleep(3)
+    log("已收起建筑列表，回到全景视图读两条建造队列倒计时", "step")
+
+
 def _au_handle_panel(adb, qq, items):
     """一键升级面板：资源够→点升级；不够→读预估时间等待；队列满→关闭读倒计时"""
     texts = [t for _, _, t, _ in items]
     log("处理一键升级面板", "step")
+    # 把面板里每个待升级项的倒计时打出来，便于确认「一次能否排两个」以及各自还要多久
+    panel_times = [(cx, cy, t, parse_seconds(t)) for cx, cy, t, _ in items
+                   if parse_seconds(t) is not None]
+    if panel_times:
+        detail = "；".join(f"({cx},{cy}) {t}" for cx, cy, t, _ in panel_times[:8])
+        log(f"面板内识别到 {len(panel_times)} 条倒计时：{detail}", "info")
+    names = [t for _, _, t, _ in items if "升级" in t and "一键" not in t]
+    if names:
+        log("待升级项：" + "、".join(names[:8]), "info")
 
-    # 解析消耗资源区（面板左下），任一资源 当前<需要 即不足
-    x1, y1, x2, y2 = scale_box(adb, (400, 760, 1060, 990))
-    res = [it for it in items if x1 <= it[0] <= x2 and y1 <= it[1] <= y2]
-    lack = any("不足" in t for t in texts)
-    for _, _, t, _ in res:
-        m = _AU_RES_RE.search(t)
-        if m and float(m.group(1)) + 1e-9 < float(m.group(3)):
-            lack = True
-    if lack:
-        # ETA 在面板顶部时钟图标旁(如 "C 34:30:00"，y≈200~700)；建造队列倒计时在下部(y≈900)。
-        # 用 _pick_eta 优先取上部时间最大值，排除下部队列区，避免把队列倒计时误当攒够时间。
-        eta = _pick_eta(items)
-        wait = (eta or 600) + 60
-        log(f"资源不足，预估 {fmt_duration(eta or 600)} 后攒够，等待 {fmt_duration(wait)}", "warn")
-        qq.push("insufficient", f"资源不足，{fmt_duration(wait)} 后重试")
-        _au_close_panel(adb)
-        time.sleep(wait)
-        return
-
+    # 2026-11-23 实机修正：面板左下「消耗资源」显示的是「本次消耗 / 当前拥有」
+    # （如 23.5万/106.4万），斜杠前小、斜杠后大恰好表示【资源充足】。旧逻辑把它当成
+    # 「当前 < 需要」→ 误判资源不足，还把面板里的升级耗时 03:00:00 当成攒够 ETA，
+    # 直接关面板长等 3 小时，结果脚本点开了一键升级却从不去点升级按钮。
+    # 用户定稿：循环只做「点一键升级 + 看倒计时」，资源够不够交给游戏自己判定
+    # （点击后若弹出不足提示，下面的校验分支会处理），这里不再做资源预判等待。
     # 橙色「升级」按钮：OCR 优先（右下区域、排除"一键升级/可升级/升级中/立即升级"），找不到用设计坐标兜底
     btn = find_button(items, ["升级"], exclude=_AU_UPGRADE_BTN_EXCLUDE,
                       region=(int(adb.w * 0.5), int(adb.h * 0.65), adb.w, adb.h),
@@ -2230,7 +2319,8 @@ def _au_handle_panel(adb, qq, items):
         btn = (bx, by)
         log("OCR 未命中升级键，回退到兜底坐标", "warn")
     adb.tap(*btn)
-    log(f"点击升级按钮 {btn}", "ok")
+    globals()["_AU_LAST_CLICK_TS"] = time.time()
+    log(f"点击一键升级面板的升级按钮 {btn}（本轮只点一次）", "ok")
     time.sleep(2.5)
 
     # 校验点击结果
@@ -2241,15 +2331,23 @@ def _au_handle_panel(adb, qq, items):
         globals()["_AU_FULL_STREAK"] = _AU_FULL_STREAK + 1
         log(f"建造队列已满（连续第 {_AU_FULL_STREAK} 次），关闭面板", "warn")
         _au_close_panel(adb)
+        _au_back_to_panorama(adb)
         return
     if any("不足" in t for t in texts2):
-        log("点击后提示资源不足，下轮走资源等待分支", "warn")
-        return                                     # 面板还开着，下轮处理
+        log("点击后提示资源不足，关闭面板，下轮改由倒计时/空位判断处理", "warn")
+        _au_close_panel(adb)
+        _au_back_to_panorama(adb)
+        return
     qq.push("upgrade_click", "已点击升级（加入建造队列）")
-    _au_close_panel(adb)
+    # 点「升级」后游戏会自动关闭一键升级面板，不必再点外侧空白（那会误触基地模型）。
+    # 直接收起列表回全景视图，下一轮才能读到两条队列倒计时并静默等待，不反复点。
+    _au_back_to_panorama(adb)
 
 
-_AU_BOTTOM_Y = 900      # 底部建造队列状态栏（倒计时/2-2）所在区域 y 下界
+_AU_BOTTOM_Y = 900      # 底部建造队列状态栏（判定/选点阈值）
+# 建筑卡里的倒计时位置比旧假设更高：1600x900 实机约 y=720~860，
+# 所以单独给倒计时读取用更宽的阈值，不影响「建筑名只在底部选点」的规则。
+_AU_TIMER_BOTTOM_Y = 820
 # 底部队列条的真实区域（设计基准）：建筑名/倒计时在这里；左侧「返回地图」、底部
 # 「基地建设 / 行政」是导航，绝不能当成可点的建筑条目（2026-11-22 实机 bug）。
 _AU_QUEUE_BAR_BOX = (1450, 880, 2150, 1010)
@@ -2275,7 +2373,9 @@ def _au_queue_full(items, adb=None):
             continue
         s = str(t).replace(" ", "")
         m = re.fullmatch(r"(\d+)/(\d+)", s)
-        if m and m.group(1) == m.group(2) and int(m.group(1)) >= 2:
+        # 实机底部同时有建筑等级「4/4」「5/5」，不能当队列满载；
+        # 建造队列只有 2 个槽位，满载特征就是「2/2」。
+        if m and m.group(1) == m.group(2) and int(m.group(1)) == 2:
             return True
     return False
 
@@ -2284,7 +2384,7 @@ def _au_queue_times(items, adb=None):
     """从底部建造队列状态栏读取进行中升级的倒计时（秒）。仅取底部栏，
     排除面板/详情里中部的倒计时，避免把建筑升级倒计时误当队列状态。
     adb 传入时按实际分辨率换算底部阈值，保证模拟器（720p/1080p/1440p）同样生效。"""
-    bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_BOTTOM_Y
+    bottom = int(adb.h * _AU_TIMER_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_TIMER_BOTTOM_Y
     times = []
     for _, cy, text, _ in items:
         if cy < bottom:
@@ -2295,10 +2395,45 @@ def _au_queue_times(items, adb=None):
     return times
 
 
+def _au_upgrade_state(items, adb=None):
+    """【第一时间判定】当前有几个建筑正在升级。
+
+    返回 (count, times, readable)：
+      count    —— 0/1/2，正在升级的数量（0 仅在明确读到空队列时给出）
+      times    —— 底部读到的倒计时秒数列表
+      readable —— 是否读到了可靠队列状态（2/2、a/2 或至少一条倒计时）。
+                  False 表示视图不对/OCR 漏读，绝不能当"有空位"去点升级空转。
+
+    实机（1600x900）3D 全景视图底部：通用港口4 02:00:40、金属炼化 00:33:42、2/2；
+    建筑列表视图底部是建筑卡片等级（4/4、2/4…），没有队列条 —— 必须先回到全景视图再判。
+    """
+    qtimes = _au_queue_times(items, adb)
+    full = _au_queue_full(items, adb)
+    bottom = int(adb.h * _AU_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_BOTTOM_Y
+    slots = []
+    for _, cy, t, sc in items or []:
+        if cy <= bottom or sc < 0.4:
+            continue
+        m = re.fullmatch(r"(\d+)/(\d+)", str(t).replace(" ", ""))
+        if m and 1 <= int(m.group(2)) <= 2:     # 建造队列只有 2 个槽位
+            slots.append((int(m.group(1)), int(m.group(2))))
+    readable = bool(full or qtimes or slots)
+    if full or len(qtimes) >= 2 or any(a >= 2 and b >= 2 for a, b in slots):
+        return 2, qtimes, True
+    if len(qtimes) == 1:
+        return 1, qtimes, True
+    if slots:
+        return max(a for a, _ in slots), qtimes, True
+    return 0, qtimes, readable
+
+
 # 连续“队列已满”次数：用于抑制「开详情→队列已满→关面板→立刻再开」的振荡。
 # 队列栏 OCR 在面板开合瞬间容易漏读 <2 条，会被误判成“有空位”。
 _AU_FULL_STREAK = 0
 _AU_NOREAD_STREAK = 0    # 连续「读不到队列又没进展」计数，用于熔断盲点死循环
+# 2026-11-23 升级循环定稿：只读倒计时 + 到期后点一次「一键升级」。
+_AU_LAST_CLICK_TS = 0.0  # 上次点升级的时间，防止倒计时结束后反复空点
+_AU_WAIT_SIGNATURE = None  # 本轮正在等的倒计时签名，避免同一条倒计时重复等待/重复点击
 
 
 def _au_in_building_detail(items):
@@ -2317,9 +2452,35 @@ def _au_on_base_build(items):
     底部只有『对接信息 / 视野收集』导航，补位环节一直空转、从不升级。
     """
     texts = [t for _, _, t, _ in items]
+    # 基地页有两种布局：常规视图左下有「返回地图」；3D/折叠视图只剩顶部
+    # 「基地建设」+ 中央区/港区/工业区分类栏。星图提示语「基地建设-舰队编组」
+    # 不会有这些分区名，所以可以安全区分。
+    in_base = any("返回地图" in t for t in texts) or any(
+        k in t for t in texts for k in ("中央区", "港区", "工业区"))
     return (any("基地建设" in t for t in texts)
-            and any("返回地图" in t for t in texts)
+            and in_base
             and not _au_in_building_detail(items))
+
+
+def _au_base_list_view(items, adb):
+    """是否已在基地建设【建筑列表视图】（右上角有「一键升级」按钮的那种）。
+
+    1600x900 实机 OCR 对比（2026-11-23）：
+      · 建筑列表视图：左上 y≈57 有「基地建设」标题，中部 y≈578 有
+        「中央区/港区/工业区」分区标题 + 建筑卡片等级（2/4、4/4…），
+        右上 y≈56 有「一键升级」文字按钮。
+      · 3D 全景视图：左上无标题，「基地建设 / 中央区 / 港区」全挤在底部
+        y≈823~842，中部是「资源管理 / 战舰生产 / 舰队编组」等功能标签，
+        右上只有分享 + 眼睛图标（同坐标点下去就是分享面板）。
+    只有确认是列表视图，才允许用 _AU_GLOBAL_UPGRADE_BTN 兜底点按钮。
+    """
+    h = getattr(adb, "h", None) or DESIGN_H
+    title = any("基地建设" in str(t) and y < h * 0.2
+                for _, y, t, _ in items or [])
+    zones = any(any(k in str(t) for k in ("中央区", "港区", "工业区"))
+                and h * 0.4 < y < h * 0.8
+                for _, y, t, _ in items or [])
+    return title and zones
 
 
 def _au_select_open_target(items, adb, target=None, locked=None):
@@ -2428,16 +2589,13 @@ def _au_skip_reached(adb, items):
 def _au_tap_upgrade(adb, qq, items):
     """在建筑详情面板里点游戏内的【一键升级】按钮发起升级。
 
-    用户要求：autoup 升级循环只走「一键升级」这条路线。
-    优先级：一键升级 > 升至满级/连续升级设置 > 普通升级（排除词过滤）。
-    返回 True 表示已处理（点了/资源不足/队列已满），False 表示面板里没找到升级按钮。
+    用户要求：autoup 升级循环只走「一键升级」这一条路线。
+    找不到「一键升级」就不点，绝不用「升至满级 / 连续升级设置 / 普通升级」替代。
+    返回 True 表示已处理（点了/资源不足/队列已满），False 表示面板里没找到一键升级。
     """
     btn = find_button(items, ["一键升级"], min_score=0.5)
     if btn is None:
-        btn = find_button(items, ["升至满级", "连续升级设置"], min_score=0.5)
-    if btn is None:
-        btn = find_button(items, ["升级"], exclude=_AU_UPGRADE_BTN_EXCLUDE, min_score=0.5)
-    if btn is None:
+        log("建筑详情内未识别到「一键升级」，本轮不升级（不用普通升级替代）", "warn")
         return False
     log(f"点击一键升级 ({btn[0]},{btn[1]})", "ok")
     adb.tap(*btn)
@@ -2538,26 +2696,77 @@ def cmd_autoup(adb, qq):
                         time.sleep(2)
                         continue
 
-                # 1) 底部建造队列状态栏读倒计时（y>900），判断队列是否满载。
-                #    倒计时常被 OCR 误读（如 881510），所以同时看队列状态「2/2」。
-                qtimes = _au_queue_times(items, adb)
-                full = _au_queue_full(items, adb)
-                if len(qtimes) >= 2 or full:
+                # 0c) 误开的「分享」面板：3D 全景视图点右上会弹出（OCR 可读到「小红书」等），
+                #     先点右上 X 关掉，再由后续分支重新点进基地建设，不让它挡住整个循环。
+                if any(k in t for t in texts for k in _AU_SHARE_PANEL_KEYS):
+                    log("检测到误开的分享面板 → 点右上 X 关闭", "warn")
+                    adb.tap(*scale_box(adb, (*_AU_SHARE_CLOSE_BTN, 0, 0))[:2])
+                    time.sleep(2)
+                    fails = 0
+                    progress = True
+                    continue
+
+                # 0d) 「暗流汹涌 · 新章节开启」活动弹窗（整屏遮罩 + 前往查看按钮）
+                #     挡住基地页 → 点右上 X 关掉；不点「前往查看」，避免跳进活动打断循环。
+                if _au_has_event_banner(items):
+                    pos = _au_close_event_banner(adb, img)
+                    log(f"检测到「暗流汹涌」活动弹窗 → 点右上 X 关闭 {pos}", "warn")
+                    fails = 0
+                    progress = True
+                    continue
+
+                # 1) 【第一时间】确保在能读到队列的 3D 全景视图：
+                #    建筑列表视图底部是建筑卡片、没有队列条，读不到"几个在升级"，
+                #    旧逻辑会误判空位 → 反复点升级又点不开 → 30 秒复查空转（死循环根因）。
+                #    所以先数升级数量：若 readable=False（视图不对/OCR漏读），先收起回全景重读。
+                count, qtimes, readable = _au_upgrade_state(items, adb)
+                if not readable and _au_base_list_view(items, adb):
+                    log("在建筑列表视图读不到队列 → 先收起回全景视图确认升级状态", "step")
+                    _au_back_to_panorama(adb)
+                    img = adb.screenshot()
+                    items = _au_ocr_all(img) if img is not None else items
+                    texts = [t for _, _, t, _ in items]
+                    count, qtimes, readable = _au_upgrade_state(items, adb)
+                    progress = True
+
+                # 把读到的倒计时发布给 GUI 底部倒计时条（GUI 定时读 state.json）。
+                # 只在可靠读到队列时发布，避免建筑列表视图的误读污染显示。
+                if readable:
+                    qnames = [t for _, cy, t, _ in items
+                              if cy >= int(adb.h * _AU_TIMER_BOTTOM_Y / DESIGN_H)
+                              and not re.fullmatch(r"[\d:]+", str(t).strip())
+                              and not re.fullmatch(r"\d+/\d+", str(t).replace(" ", ""))
+                              and str(t).strip() not in _AU_NAV_WORDS][:2]
+                    _publish_upgrade_etas(qtimes, qnames, count)
+
+                # 1a) 数出"几个在升级"后分流（用户定稿 2026-11-23）：
+                #     2 个在升级 → 看倒计时还有多久，不管它（静默等待）
+                #     1 个在升级 → 看这一个还有多久，去点一次一键升级补位
+                #     0 个       → 去点一次一键升级
+                if count >= 2:
                     globals()["_AU_FULL_STREAK"] = 0
                     globals()["_AU_NOREAD_STREAK"] = 0
-                    if qtimes:
-                        near = fmt_duration(min(qtimes))
-                        wait = min(qtimes) + 45
-                    else:
-                        near = "倒计时未读到"
-                        wait = 600
-                    why = "队列状态2/2" if full else "两条倒计时"
-                    log(f"队列满载（{why}），最近到期 {near}，等待 {fmt_duration(wait)}", "ok")
-                    qq.push("long_upgrade", f"队列满载，{near} 后到期补位")
+                    eta = min(qtimes) if qtimes else _pick_eta(items)
+                    signature = (len(qtimes), round(eta or 0))
+                    if globals().get("_AU_WAIT_SIGNATURE") == signature:
+                        # 同一条倒计时已经被等待过一次：游戏还没释放队列，短等复查，绝不反复点
+                        time.sleep(30)
+                        progress = True
+                        continue
+                    globals()["_AU_WAIT_SIGNATURE"] = signature
+                    near = fmt_duration(eta) if eta else "倒计时未读到"
+                    wait = max(20, eta + 20) if eta else 300
+                    log(f"2 个建筑都在升级（读到{len(qtimes)}条倒计时），最近到期 {near}，"
+                        f"不管它、静默等待 {fmt_duration(wait)}", "ok")
+                    qq.push("long_upgrade", f"两个升级倒计时，{near} 后到期再点一键升级")
                     time.sleep(wait)
                     fails = 0
                     progress = True
                     continue
+                if count == 1:
+                    eta = qtimes[0] if qtimes else _pick_eta(items)
+                    near = fmt_duration(eta) if eta else "倒计时未读到"
+                    log(f"1 个建筑在升级（还需 {near}）→ 去点一次一键升级补位", "step")
 
                 # 1b) 连续两次“队列已满”说明队列栏只是 OCR 漏读、其实仍是满载 → 强制歇一轮
                 if _AU_FULL_STREAK >= 2:
@@ -2568,29 +2777,34 @@ def cmd_autoup(adb, qq):
                     progress = True
                     continue
 
-                # 2a) 已在建筑详情面板 → 直接点升级入口（优先于面板键判断，
-                #     避免把详情页里的“消耗资源”误当一键升级面板处理）
+                # 2a) 误进建筑详情面板：只关闭，不走详情里的单建筑升级。
+                #     用户定稿：升级循环只走游戏内「一键升级」面板这一条路线。
                 if _au_in_building_detail(items):
-                    # 速本方案：当前建筑已达目标等级 → 关面板并记入跳过集合，不再点升级
-                    if _au_skip_reached(adb, items):
-                        fails = 0
-                        continue
-                    if _au_tap_upgrade(adb, qq, items):
-                        fails = 0
-                        progress = True
-                        continue
-                    _au_close_panel(adb)   # 点不到升级按钮，关面板回基地重试
+                    log("建筑详情面板已关闭（本循环只走一键升级）", "warn")
+                    _au_close_panel(adb)
                     continue
 
                 # 1a) 一键升级/建筑面板已打开（非详情页）→ 直接处理（这是判断队列状态最可靠的入口）
                 if any(k in t for t in texts for k in _AU_PANEL_KEYS):
+                    if time.time() - globals().get("_AU_LAST_CLICK_TS", 0) < 90:
+                        log("刚点过一键升级，关闭面板等下一轮，不重复点", "warn")
+                        _au_close_panel(adb)
+                        continue
                     _au_handle_panel(adb, qq, items)
                     fails = 0
+                    progress = True
                     continue
 
-                # 2b) 在基地建设页 → 队列栏读不到空位时，从底部队列条打开一个建筑详情补位；
-                #     找不到「一键升级」按钮时绝不用固定坐标兜底去点右上角（那是直播挂件，会死循环），
-                #     连试 3 次仍无进展 → 熔断长等待，避免盲点坐标的死循环
+                # 队列已出现空位（或读不到倒计时）→ 允许点一次一键升级。
+                # 冷却 90 秒，防止倒计时刚结束游戏还没刷新时反复空点。
+                globals()["_AU_WAIT_SIGNATURE"] = None
+                if time.time() - globals().get("_AU_LAST_CLICK_TS", 0) < 90:
+                    time.sleep(30)
+                    progress = True
+                    continue
+
+                # 2b) 在基地建设页 → 只打开右上角「一键升级」面板；
+                #     不再从底部队列条打开建筑详情，避免走回单建筑升级的旧路线。
                 if _au_on_base_build(items):
                     globals()["_AU_NOREAD_STREAK"] = _AU_NOREAD_STREAK + 1
                     if _AU_NOREAD_STREAK > 3:
@@ -2601,20 +2815,57 @@ def cmd_autoup(adb, qq):
                         time.sleep(900)
                         progress = True
                         continue
-                    pos = _au_find(items, "一键升级")
+                    # 「一键升级」文字按钮只存在于【建筑列表视图】；3D 全景视图的
+                    # 右上同坐标是分享按钮，绝不直接点固定坐标（2026-11-23 实机误点根因）。
+                    pos = _au_find(items, "一键升级", min_score=0.45)
                     if pos is None:
-                        # 没有「一键升级」按钮：直接走底部队列条补位（安全、稳定），不碰右上角挂件
-                        if _au_open_target(adb, items):
-                            globals()["_AU_NOREAD_STREAK"] = 0
-                            fails = 0
-                            continue
-                        log("队列栏未读到且无法定位一键升级/建筑入口，稍后重试", "warn")
-                        time.sleep(30)
-                        continue
-                    log(f"队列栏未读到（视图不显示），点一键升级确认状态 ({pos[0]},{pos[1]})", "warn")
+                        if not _au_base_list_view(items, adb):
+                            # 当前是 3D 全景视图 / 其它页 → 先「点进基地建设」展开建筑列表视图
+                            nav = _au_bottom_nav(items, adb, "基地建设")
+                            if nav is None:
+                                nav = scale_box(adb, (*_AU_BASE_LIST_ENTRY, 0, 0))[:2]
+                            log(f"当前不是建筑列表视图，先点进基地建设展开列表 {nav}", "step")
+                            adb.tap(*nav)
+                            time.sleep(5)      # 展开转场实测 4~7 秒，等够再 OCR
+                            img1 = adb.screenshot()
+                            items1 = _au_ocr_all(img1) if img1 is not None else []
+                            pos = _au_find(items1, "一键升级", min_score=0.45)
+                            if pos is None:
+                                log("点进基地建设后仍未读到「一键升级」按钮，30 秒后复查（绝不盲点右上）", "warn")
+                                time.sleep(30)
+                                continue
+                        else:
+                            # 已在建筑列表视图、只是 OCR 漏读按钮文字：
+                            # 此视图该坐标确定是「一键升级」，可以安全用校准坐标兜底。
+                            pos = scale_box(adb, (*_AU_GLOBAL_UPGRADE_BTN, 0, 0))[:2]
+                            log(f"建筑列表视图内 OCR 漏读「一键升级」，用已校准按钮坐标 {pos}", "warn")
                     adb.tap(*pos)
                     time.sleep(2.5)
-                    fails = 0
+                    img2 = adb.screenshot()
+                    items2 = _au_ocr_all(img2) if img2 is not None else items
+                    if any(k in t for t in (t for _, _, t, _ in items2)
+                           for k in _AU_PANEL_KEYS):
+                        log("一键升级面板已打开", "step")
+                        _au_handle_panel(adb, qq, items2)
+                        globals()["_AU_NOREAD_STREAK"] = 0
+                        fails = 0
+                        progress = True
+                        continue
+                    # 面板没开：绝不原地 30 秒复查空转（那是死循环根因）。
+                    # 先关掉可能误弹的面板，再回全景视图重新数"几个在升级"：
+                    # 若其实已经 2 个在升级（刚才那次点已生效），下一轮会正确进入等待。
+                    if any(k in t for t in (t for _, _, t, _ in items2)
+                           for k in _AU_SHARE_PANEL_KEYS):
+                        log("点击后误开分享面板 → 点右上 X 关闭", "warn")
+                        adb.tap(*scale_box(adb, (*_AU_SHARE_CLOSE_BTN, 0, 0))[:2])
+                        time.sleep(2)
+                    if _au_has_event_banner(items2):
+                        _au_close_event_banner(adb, img2)
+                    # 回到全景视图，让下一轮第一时间能读到队列状态
+                    if not _au_on_base_build(items2):
+                        _au_close_panel(adb)
+                    _au_back_to_panorama(adb)
+                    log("一键升级面板未打开 → 已回全景视图，下轮重新数升级数量（不空转）", "warn")
                     continue
 
                 # 3) 其它页：导航回基地。
@@ -2691,8 +2942,8 @@ _MAIL_CLAIM_KW = ("领取", "提取附件", "一键领取", "全部领取", "领
 # 任务面板（星图左上角「清单打勾」图标，无文字标签，只能靠坐标；实测 2310x1080）
 _TASK_ICON = (77, 52)        # 任务面板星形徽记 #13 的最后兜底；正常路径由 ICON_ONLY_ENTRIES.task_panel_entry 模板命中
 _TASK_TABS = ("主线任务", "委托任务", "支线任务", "赏金任务", "集结")
-_TASK_CLOSE = (2100, 65)     # 任务面板右上角门形关闭图标（模板实测中心；与注册表 fallback 一致）
-_TASK_CLOSE_ALT = (2080, 43)  # 布局差异时的第二兜底
+_TASK_CLOSE = (2194, 54)     # 任务面板右上展开/收起键 (1520,45)@1600x900，实机可退回星图
+_TASK_CLOSE_ALT = (2100, 65)  # 旧版门形关闭图标，仅作布局差异兜底
 
 
 def _daily_claim_tasks(adb, qq):
@@ -2754,10 +3005,18 @@ def _daily_claim_tasks(adb, qq):
         # 领取后可能弹出的奖励窗/确认键
         img2 = adb.screenshot()
         if img2 is not None:
-            p2 = find_button(_au_ocr_all(img2), ["确定", "确认", "点击继续", "关闭"], min_score=0.45)
+            items2 = _au_ocr_all(img2)
+            p2 = find_button(items2, ["确定", "确认", "点击继续", "关闭"], min_score=0.45)
             if p2:
                 adb.tap(*p2)
                 time.sleep(1.5)
+            elif any("奖励选择" in t for _, _, t, _ in items2):
+                # 任务一键领取会弹「奖励选择」，需要玩家自己挑奖励；脚本不替用户做选择，
+                # 只关掉弹窗，否则它会挡住后续所有导航，导致 daily/autoup 一直空转。
+                x, y = scale_box(adb, (1678, 79, 0, 0))[:2]
+                log(f"奖励选择弹窗需人工挑选，已关闭继续：{x},{y}", "warn")
+                adb.tap(x, y)
+                time.sleep(2)
 
     _daily_tap_task_close(adb)
     return n
@@ -2789,6 +3048,16 @@ def _daily_ensure_starmap(adb):
             continue
         if "行政规划" in texts:                 # 基地管理菜单遮挡 → 点外侧关
             adb.tap(int(adb.w * 0.3), int(adb.h * 0.5))
+            time.sleep(1.5)
+            continue
+        if _au_has_event_banner(items):         # 「暗流汹涌」活动弹窗 → 右上 X 关掉，不点前往查看
+            pos = _au_close_event_banner(adb, img)
+            log(f"关闭「暗流汹涌」活动弹窗：{pos}", "warn")
+            continue
+        if "奖励选择" in texts:                 # 一键领取后的奖励挑选弹窗 → 关掉，不替用户选
+            x, y = scale_box(adb, (1678, 79, 0, 0))[:2]
+            log(f"关闭奖励选择弹窗（需人工挑选）：{x},{y}", "warn")
+            adb.tap(x, y)
             time.sleep(1.5)
             continue
         # 邮件面板残留（标题『邮件』+ 至少两个分类竖栏，或出现发件人/日期字段）→ 点外侧关闭
