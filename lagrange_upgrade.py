@@ -269,6 +269,7 @@ PERF_MODES = {
         "backoff_max": 90.0,
         "wake_every": 30.0,
         "health_every": 60.0,
+        "eta_calibrate_every": 3600.0,   # 静默等待中每小时重读一次真实倒计时校准显示
         "gui_poll_ms": 500,
     },
     "balanced": {                 # 均衡：响应更快，温度适中
@@ -277,6 +278,7 @@ PERF_MODES = {
         "backoff_max": 45.0,
         "wake_every": 15.0,
         "health_every": 30.0,
+        "eta_calibrate_every": 3600.0,
         "gui_poll_ms": 300,
     },
     "turbo": {                    # 原速：排障用，发热最高
@@ -285,6 +287,7 @@ PERF_MODES = {
         "backoff_max": 0.0,
         "wake_every": 0.0,
         "health_every": 0.0,
+        "eta_calibrate_every": 3600.0,   # 校准频率与档位无关，统一 1 小时
         "gui_poll_ms": 120,
     },
 }
@@ -305,7 +308,8 @@ def perf_settings(config=None, mode=None):
     # 允许配置里单独覆盖数值（只接受合法类型/范围）
     for key, lo, hi in (("ocr_threads", 0, 64), ("loop_min_interval", 0.0, 600.0),
                         ("backoff_max", 0.0, 3600.0), ("wake_every", 0.0, 3600.0),
-                        ("health_every", 0.0, 3600.0), ("gui_poll_ms", 50, 5000)):
+                        ("health_every", 0.0, 3600.0), ("gui_poll_ms", 50, 5000),
+                        ("eta_calibrate_every", 0.0, 86400.0)):
         v = p.get(key)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi:
             out[key] = int(v) if key in ("ocr_threads", "gui_poll_ms") else float(v)
@@ -1115,6 +1119,14 @@ def parse_seconds(text, max_seconds=2592000, min_seconds=0):
     t = text.replace("：", ":")  # 全角冒号归一化
     # 1) HH:MM:SS（小时 1~2 位，分/秒 00~59），左右不为数字/冒号，避免截断
     m = re.search(r"(?<![\d:])([0-9]{1,2}):([0-5]\d):([0-5]\d)(?![\d:])", t)
+    if m:
+        sec = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        if min_seconds <= sec <= max_seconds:
+            return sec
+    # 1b) OCR 容错：时间末尾多读 1~2 位数字（如 00:27:093 / 00:27:0934），
+    #     取标准 HH:MM:SS 前段。实机 1600x900 底部队列条曾读成 00:27:093，
+    #     若不容错会导致倒计时丢失、GUI 显示清空（2026-11-24 实测 bug）。
+    m = re.search(r"(?<![\d:])([0-9]{1,2}):([0-5]\d):([0-5]\d)[0-9]{1,2}(?![\d:])", t)
     if m:
         sec = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
         if min_seconds <= sec <= max_seconds:
@@ -2302,6 +2314,69 @@ def _publish_upgrade_etas(times, names=None, count=None):
         log(f"写入升级倒计时到 state.json 失败：{e}", "warn")
 
 
+def _au_recalibrate_etas(adb, tag="倒计时校准"):
+    """重读一遍真实队列倒计时并写回 state.json（重置 at/sec 基准）。
+
+    只截图 OCR + 写 state，绝不点击。返回 (count, qtimes, readable)。
+    tag 用于日志前缀（"一键升级后重读" / "倒计时校准"）。
+    """
+    img = adb.screenshot()
+    if img is None:
+        log(f"{tag}：截图失败，跳过重读", "warn")
+        return 0, [], False
+    items = _au_ocr_all(img)
+    count, qtimes, readable = _au_upgrade_state(items, adb)
+    if readable:
+        pairs = _au_queue_pairs(items, adb)
+        _publish_upgrade_etas([p[0] for p in pairs],
+                              [p[1] for p in pairs], len(pairs))
+        log(f"{tag}：重读到 {len(qtimes)} 条队列倒计时"
+            + (f"，最近到期 {fmt_duration(min(qtimes))}" if qtimes else "")
+            + "，已更新显示基准", "step")
+    else:
+        log(f"{tag}：当前读不到队列，保持上次基准", "warn")
+    return count, qtimes, readable
+
+
+def _au_wait_with_calibration(adb, qq, wait_sec, calib_every=3600.0):
+    """静默等待，期间每隔 calib_every 秒重读一次真实倒计时校准 state.json 显示。
+
+    2026-11-24 用户要求："倒计时读一次就不读了，要多读几次校准，频率不要太多，
+    一个小时一次。" 旧逻辑 time.sleep(wait) 一睡到底，GUI 只靠本地递减会漂移。
+    本函数把长等待切成多段，每段醒来只做一件事：截图 OCR 重读底部队列倒计时，
+    用真实值重写 state.json 的 upgrade_etas（重置 at/sec 基准），然后继续等下一段。
+
+    严格遵守：
+      - 校准期间【绝不点击】任何按钮（只截图 OCR + 写 state）；
+      - 不改变等待语义：倒计时没到就继续等，不提前去点升级；
+      - 频率可控：calib_every<=0 表示不校准（一次性 sleep，兼容旧行为）；
+      - 若校准时发现队列已空（count<2），提前返回让主循环去补位。
+    """
+    calib_every = float(calib_every or 0)
+    if calib_every <= 0:
+        time.sleep(max(0, wait_sec))
+        return True
+    deadline = time.monotonic() + max(0, wait_sec)
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        seg = min(remain, calib_every)
+        time.sleep(seg)
+        if time.monotonic() >= deadline:
+            break
+        # 醒来校准：只截图 OCR，不点击
+        try:
+            count, qtimes, readable = _au_recalibrate_etas(adb, "倒计时校准")
+            # 队列已出现空位 → 提前结束等待，让主循环去补位
+            if readable and count < 2:
+                log("倒计时校准：队列已出现空位，提前结束等待去补位", "step")
+                break
+        except Exception as e:
+            log(f"倒计时校准异常（忽略，继续等）: {e}", "warn")
+    return True
+
+
 def _au_close_panel(adb):
     """关闭建筑详情面板：优先图标模板找 X；否则点面板【外侧】空白区收起。
 
@@ -2397,6 +2472,14 @@ def _au_handle_panel(adb, qq, items):
     # 点「升级」后游戏会自动关闭一键升级面板，不必再点外侧空白（那会误触基地模型）。
     # 直接收起列表回全景视图，下一轮才能读到两条队列倒计时并静默等待，不反复点。
     _au_back_to_panorama(adb)
+    # 2026-11-24 用户要求："一键升级后也要重读一遍，就是那个动作" ——
+    # 刚点完升级、队列条已变化，立即重读真实倒计时写回 state.json，
+    # GUI 立刻显示新队列，不必再等下一轮主循环（下一轮仍会正常判定/静默等待）。
+    try:
+        time.sleep(1.5)   # 给游戏队列条刷新留出时间
+        _au_recalibrate_etas(adb, "一键升级后重读")
+    except Exception as e:
+        log(f"一键升级后重读失败（不影响主循环）: {e}", "warn")
 
 
 _AU_BOTTOM_Y = 900      # 底部建造队列状态栏（判定/选点阈值）
@@ -2863,7 +2946,9 @@ def cmd_autoup(adb, qq):
                     log(f"2 个建筑都在升级（读到{len(qtimes)}条倒计时），最近到期 {near}，"
                         f"不管它、静默等待 {fmt_duration(wait)}", "ok")
                     qq.push("long_upgrade", f"两个升级倒计时，{near} 后到期再点一键升级")
-                    time.sleep(wait)
+                    # 静默等待期间每小时重读一次真实倒计时校准显示（不点击、不改变等待语义）
+                    _au_wait_with_calibration(adb, qq, wait,
+                                              perf.get("eta_calibrate_every", 3600.0))
                     fails = 0
                     progress = True
                     continue

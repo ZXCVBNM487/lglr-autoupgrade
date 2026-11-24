@@ -693,6 +693,165 @@ class TestRobustness(unittest.TestCase):
         self.assertFalse(tester._parent_pid_alive(99999999))
 
 
+class TestParseSecondsOcrTolerance(unittest.TestCase):
+    """2026-11-24 实机：底部倒计时被 OCR 多读尾缀（00:27:093）不能丢。"""
+
+    def test_trailing_digit_tolerated(self):
+        self.assertEqual(L.parse_seconds("00:27:093"), 1629)
+        self.assertEqual(L.parse_seconds("00:27:0934"), 1629)
+        self.assertEqual(L.parse_seconds("00:27:09"), 1629)
+
+    def test_normal_still_works(self):
+        self.assertEqual(L.parse_seconds("1:23:45"), 5025)
+        self.assertEqual(L.parse_seconds("00:01:30"), 90)
+        self.assertIsNone(L.parse_seconds("08:0:10"))  # 真非法格式仍拒绝
+
+    def test_queue_pairs_reads_trailing_digit(self):
+        import tester, inspect
+        src = inspect.getsource(L.parse_seconds)
+        self.assertIn("OCR 容错", src)
+
+
+class TestCalibrationIntervalUI(unittest.TestCase):
+    """2026-11-24：GUI 可自定义倒计时检测间隔（分钟）。"""
+
+    def setUp(self):
+        import tester
+        self.T = tester
+
+    def test_minutes_conversion(self):
+        self.assertEqual(self.T.calib_minutes_from_cfg({}), 60)
+        self.assertEqual(self.T.calib_minutes_from_cfg(
+            {"performance": {"eta_calibrate_every": 7200}}), 120)
+        self.assertEqual(self.T.calib_minutes_from_cfg(
+            {"performance": {"eta_calibrate_every": 900}}), 15)
+        self.assertEqual(self.T.calib_minutes_from_cfg(
+            {"performance": {"eta_calibrate_every": 0}}), 0)
+
+    def test_rounds_up_to_at_least_one(self):
+        self.assertEqual(self.T.calib_minutes_from_cfg(
+            {"performance": {"eta_calibrate_every": 30}}), 1)
+
+    def test_ui_has_interval_control(self):
+        import inspect
+        src = inspect.getsource(self.T.run_gui)
+        self.assertIn("检测间隔", src)
+        self.assertIn("calib_minutes_from_cfg", src)
+        self.assertIn("eta_calibrate_every", src)
+        self.assertIn("_on_calib_save", src)
+
+    def test_core_reads_same_config_key(self):
+        import inspect
+        src = inspect.getsource(L._au_wait_with_calibration)
+        self.assertIn("calib_every", src)
+        self.assertIn("eta_calibrate_every", inspect.getsource(L.cmd_autoup))
+
+
+class TestRecalibrateAfterUpgrade(unittest.TestCase):
+    """2026-11-24：一键升级点击成功后立即重读一遍真实倒计时。"""
+
+    def test_upgrade_handler_calls_recalibrate(self):
+        import inspect
+        src = inspect.getsource(L._au_handle_panel)
+        self.assertIn("_au_recalibrate_etas(adb, \"一键升级后重读\")", src)
+        self.assertIn("_au_back_to_panorama(adb)", src)
+
+    def test_recalibrate_writes_state_no_tap(self):
+        """重读函数只截图 OCR + 写 state，绝不 tap。"""
+        import unittest.mock as mock
+        calls = {"tap": 0, "publish": []}
+        class FakeAdb:
+            w, h = 1600, 900
+            def screenshot(self): return "img"
+            def tap(self, *a): calls["tap"] += 1
+        items = [(1086, 852, "01:30:00", 0.85), (1265, 852, "00:20:00", 0.85),
+                 (1089, 831, "通用港口4", 0.8), (1265, 831, "金属炼化工", 0.8),
+                 (801, 853, "2/2", 0.8)]
+        with mock.patch.object(L, "_au_ocr_all", return_value=items), \
+             mock.patch.object(L, "_publish_upgrade_etas",
+                               side_effect=lambda *a: calls["publish"].append(a)):
+            count, qtimes, readable = L._au_recalibrate_etas(FakeAdb(), "测试重读")
+        self.assertEqual(count, 2)
+        self.assertEqual(len(qtimes), 2)
+        self.assertTrue(readable)
+        self.assertEqual(calls["tap"], 0)              # 绝不点击
+        self.assertEqual(len(calls["publish"]), 1)     # 写了 state
+        self.assertEqual(calls["publish"][0][1], ["通用港口4", "金属炼化工"])  # 左→右
+
+    def test_wait_uses_shared_recalibrate(self):
+        import inspect
+        self.assertIn("_au_recalibrate_etas", inspect.getsource(L._au_wait_with_calibration))
+
+
+class TestEtaCalibration(unittest.TestCase):
+    """2026-11-24：静默等待每小时重读一次真实倒计时校准（用户要求"多读几次校准"）。"""
+
+    def test_perf_defaults_3600(self):
+        for m in ("eco", "balanced", "turbo"):
+            self.assertEqual(L.perf_settings(mode=m)["eta_calibrate_every"], 3600.0)
+
+    def test_calibration_splits_wait(self):
+        """长等待被切成多段，每段醒来触发一次 OCR 校准；用 mock 避免真 sleep。"""
+        import unittest.mock as mock
+        calls = {"sleep": [], "shot": 0, "publish": []}
+        real_sleep = L.time.sleep
+
+        def fake_sleep(sec):
+            calls["sleep"].append(sec)
+
+        class FakeAdb:
+            w, h = 1600, 900
+            def screenshot(self):
+                calls["shot"] += 1
+                return "fake_img"
+
+        # 造一个 2/2 满载 + 两条倒计时的画面 items
+        items = [(1086, 852, "02:00:00", 0.85), (1265, 852, "00:30:00", 0.85),
+                 (1089, 831, "通用港口4", 0.8), (1265, 831, "金属炼化工", 0.8),
+                 (801, 853, "2/2", 0.8)]
+
+        with mock.patch.object(L.time, "sleep", side_effect=fake_sleep), \
+             mock.patch.object(L, "_au_ocr_all", return_value=items), \
+             mock.patch.object(L, "_publish_upgrade_etas",
+                               side_effect=lambda *a: calls["publish"].append(a)):
+            # wait=3小时, 校准间隔=1小时 → 应在 1h/2h 各校准一次(醒来但没到 deadline)
+            # 用一次性推进 monotonic 模拟时间流逝
+            t = [0.0]
+            with mock.patch.object(L.time, "monotonic", side_effect=lambda: t[0]):
+                def fake_sleep_adv(sec):
+                    calls["sleep"].append(sec)
+                    t[0] += sec
+                with mock.patch.object(L.time, "sleep", side_effect=fake_sleep_adv):
+                    L._au_wait_with_calibration(FakeAdb(), None, 10800.0, 3600.0)
+
+        # 应有 3 段 sleep：3600/3600/3600；前两次醒来触发校准（shot 2 次）
+        self.assertEqual(len(calls["sleep"]), 3, calls["sleep"])
+        self.assertEqual(calls["sleep"][0], 3600.0)
+        self.assertEqual(calls["shot"], 2)          # 2 次校准重读
+        self.assertEqual(len(calls["publish"]), 2)  # 2 次校准写 state
+
+    def test_no_calibration_when_disabled(self):
+        """calib_every<=0 时不校准：只 sleep 一次，不截图。"""
+        import unittest.mock as mock
+        calls = {"sleep": [], "shot": 0}
+        class FakeAdb:
+            w, h = 1600, 900
+            def screenshot(self):
+                calls["shot"] += 1
+                return "x"
+        with mock.patch.object(L.time, "sleep", side_effect=lambda s: calls["sleep"].append(s)), \
+             mock.patch.object(L, "_au_ocr_all", return_value=[]):
+            L._au_wait_with_calibration(FakeAdb(), None, 500.0, 0)
+        self.assertEqual(calls["sleep"], [500.0])
+        self.assertEqual(calls["shot"], 0)
+
+    def test_loop_uses_calibration_wait(self):
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        self.assertIn("_au_wait_with_calibration(", src)
+        self.assertIn("eta_calibrate_every", src)
+
+
 class TestTerminateAll(unittest.TestCase):
     """2026-11-24「全部终止」按钮：清残留但不杀自己。"""
 

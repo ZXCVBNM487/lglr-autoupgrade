@@ -543,6 +543,22 @@ def save_cfg(cfg):
         return False
 
 
+def calib_minutes_from_cfg(cfg=None):
+    """从 config.json 读倒计时检测（校准）间隔，返回分钟数（默认 60）。
+
+    配置里存的是秒（performance.eta_calibrate_every），GUI 用分钟显示。
+    """
+    cfg = cfg if cfg is not None else load_cfg()
+    try:
+        sec = (cfg.get("performance") or {}).get("eta_calibrate_every", 3600)
+        sec = float(sec)
+        if sec <= 0:
+            return 0            # 0 = 关闭校验
+        return max(1, round(sec / 60))
+    except Exception:
+        return 60
+
+
 # ===== 性能档位（发热 / CPU 占用控制）=====
 # GUI 不 import 主脚本（保证秒开），这里只放标签与轮询间隔的轻量映射；
 # 真正的运行参数在 lagrange_upgrade.py 的 PERF_MODES 里，切换写回 config.json。
@@ -903,6 +919,44 @@ def run_gui():
         append_log(f"[配置] 性能档位已切换为 {label}；已启动的挂机需重启后生效\n", "ok")
 
     perf_cb.bind("<<ComboboxSelected>>", _on_perf_change)
+
+    # ---------- 倒计时检测间隔（真实重读校准频率，单位分钟）----------
+    calibrow = tk.Frame(devbox, bg=BG_PANEL)
+    calibrow.pack(fill="x", padx=12, pady=(0, 10))
+    tk.Label(calibrow, text="检测间隔", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    calib_var = tk.StringVar(value=str(calib_minutes_from_cfg()))
+    calib_entry = tk.Entry(calibrow, textvariable=calib_var, width=6, font=FONT_SM,
+                           bg=BG_LOG, fg=FG, insertbackground=FG, relief="flat")
+    calib_entry.pack(side="left", padx=(6, 4))
+    tk.Label(calibrow, text="分钟 / 次（0=关闭）", bg=BG_PANEL, fg=FG_DIM,
+             font=FONT_SM).pack(side="left", padx=(0, 8))
+    calib_hint = tk.Label(calibrow, text="默认60分钟，越小越准但越费电",
+                          bg=BG_PANEL, fg=FG_DIM, font=FONT_SM)
+    calib_hint.pack(side="left")
+
+    def _on_calib_save():
+        raw = calib_var.get().strip()
+        try:
+            minutes = float(raw)
+            if minutes < 0 or minutes > 1440:
+                raise ValueError("范围 0~1440")
+        except ValueError:
+            messagebox.showwarning("无效间隔", "请输入 0~1440 的数字（分钟）。\n0=关闭校准。")
+            return
+        cfg = load_cfg()
+        if not isinstance(cfg.get("performance"), dict):
+            cfg["performance"] = {}
+        cfg["performance"]["eta_calibrate_every"] = int(minutes * 60)
+        if not save_cfg(cfg):
+            messagebox.showerror("失败", "config.json 写入失败，可能被占用。")
+            return
+        append_log(f"[配置] 倒计时检测间隔已设为 {raw} 分钟"
+                   f"（{'关闭校准' if minutes == 0 else '已启动的挂机需重启后生效'}）\n", "ok")
+
+    tk.Button(calibrow, text="保存", bg="#2f3540", fg=ACCENT,
+              activebackground="#3a414d", activeforeground=ACCENT,
+              relief="flat", font=FONT_SM, padx=10, cursor="hand2",
+              command=_on_calib_save).pack(side="left", padx=(8, 0))
 
     # ========== 底部实时升级倒计时条（两条并排，始终可见） ==========
     # 数据来自 state.json 的 upgrade_etas（升级循环每轮写入），GUI 定时读取并按

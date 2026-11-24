@@ -4,7 +4,8 @@
     "serial": ""
   },
   "performance": {
-    "mode": "eco"
+    "mode": "eco",
+    "eta_calibrate_every": 3600
   },
   "au_target_building": "",
   "au_locked_buildings": [],
