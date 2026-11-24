@@ -28,6 +28,18 @@ ADB_SUBDIRS = ("", "shell", "bin", "adb", "platform-tools", "tools", "sdk")
 _STATIC = [
     # 独立官方 platform-tools（真机优先，版本最新，避免与模拟器 adb 冲突）
     r"E:\AndroidBuild\platform-tools-latest-windows\platform-tools\adb.exe",
+    # 其他官方 platform-tools（2026-11-24 全盘扫描实测可用）
+    r"E:\项目文件2\platform-tools\adb.exe",
+    r"E:\项目文件2\android_usb_assistant\platform-tools\adb.exe",
+    r"C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe",
+    # adb_ai_annotator 打包产物里的 adb（旧备份也一并纳入，避免定位遗漏）
+    r"E:\项目文件2\dist\adb_ai_annotator\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator\_internal\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator_dbg\_internal\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator_old_backup_20261017\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator_old_backup_20261017_v2\_internal\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator_old_backup_20261017_v3\platform-tools\adb.exe",
+    r"E:\项目文件2\dist\adb_ai_annotator_old_backup_20261017_v3\_internal\platform-tools\adb.exe",
     # 网易 MuMu（含 FeverApps 渠道版 / nx_device 结构）
     r"D:\FeverApps\MuMuFever\nx_main\adb.exe",
     r"D:\FeverApps\MuMuFever\nx_device\12.0\shell\adb.exe",
@@ -238,6 +250,99 @@ def find_adb_ex(config=None):
     if p:
         return p, "全盘扫描"
     return None, ""
+
+
+def scan_all_adbs(timeout=12, connect_serial=""):
+    """【全盘扫描】列出电脑上所有 adb.exe，逐个测版本 / 可用性 / 在线设备。
+
+    2026-11-24 用户要求："把电脑全部 ADB 都扫出来，全部尝试能不能使用、是否在线"。
+    与 find_adb_ex（找到第一个就返回）不同，这里收集全部候选并逐个验证。
+
+    返回 list[dict]：path / size / version / usable / devices(list) / online(bool) / source
+      - version: 从 `adb version` 的 Version 行提取
+      - usable: adb version 能否正常返回
+      - devices: `adb devices` 的在线序列号列表
+      - online: connect_serial 指定时，该 adb 能否连接到该设备
+    """
+    import subprocess
+    found = {}
+
+    def add(p, source):
+        if not p or not os.path.isfile(p):
+            return
+        np = os.path.normcase(os.path.normpath(p))
+        if np not in found:
+            found[np] = {"path": os.path.normpath(p), "source": source}
+
+    # 1. 静态表（已补全全盘扫描发现的 14 个）
+    for s in _STATIC:
+        add(s, "静态表")
+    # 2. PATH
+    p = _from_where()
+    if p:
+        add(p, "系统PATH")
+    # 3. 运行中的模拟器进程附近
+    p = _from_process()
+    if p:
+        add(p, "模拟器进程")
+    # 4. 关键词目录快速扫描（限时，避免全盘 find 卡死）
+    deadline = time.time() + timeout
+    for letter in "CDEF":
+        root = f"{letter}:\\"
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            if time.time() > deadline:
+                break
+            base = os.path.basename(dirpath).lower()
+            # 只深入关键词目录 / 前两层，避免扫描整个系统盘
+            if dirpath.count(os.sep) >= 2 and not any(k in base for k in _KEYWORDS):
+                dirnames[:] = []
+                continue
+            for fn in ADB_NAMES:
+                if fn.lower() in [f.lower() for f in filenames]:
+                    add(os.path.join(dirpath, fn), "目录扫描")
+
+    def run(p, args, t=8):
+        try:
+            r = subprocess.run([p] + list(args), capture_output=True, timeout=t,
+                               creationflags=CREATE_NO_WINDOW)
+            # 输出可能是 GBK 中文，用 replace 容错，避免 UnicodeDecodeError
+            return (r.stdout + r.stderr).decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            return "TIMEOUT"
+        except Exception as e:
+            return f"ERR:{e}"
+
+    results = []
+    for np, item in found.items():
+        p = item["path"]
+        try:
+            size = os.path.getsize(p)
+        except Exception:
+            size = 0
+        ver_out = run(p, ["version"])
+        vline = next((l.strip() for l in ver_out.splitlines()
+                      if l.strip().startswith("Version ")), "")
+        usable = bool(vline)
+        # 逐个尝试连接（共享 daemon 时会回 already connected，同样算成功）
+        connect_ok = False
+        if connect_serial:
+            co = run(p, ["connect", connect_serial], 10)
+            connect_ok = "connected" in co.lower() and "failed" not in co.lower()
+        dev_out = run(p, ["devices"], 10)
+        devices = []
+        for l in dev_out.splitlines():
+            l = l.strip()
+            if "\tdevice" in l:
+                devices.append(l.split()[0])
+        results.append({
+            "path": p, "size": size, "version": vline, "usable": usable,
+            "devices": devices, "online": bool(devices),
+            "connect_ok": connect_ok, "source": item["source"],
+        })
+    results.sort(key=lambda r: (not r["usable"], r["path"].lower()))
+    return results
 
 
 if __name__ == "__main__":

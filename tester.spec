@@ -16,6 +16,7 @@ hiddenimports = [
     "lagrange_upgrade",
     "adb_locator",
     "qq_official",
+    "psutil",  # 「全部终止」按钮用它精确按项目路径筛进程，防误杀
 ]
 
 # OCR / 图像依赖：这些包带数据文件与二进制，必须整包收集

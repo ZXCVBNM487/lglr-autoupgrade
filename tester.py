@@ -165,7 +165,140 @@ if "--cli" in sys.argv:
 
 
 # ==================== 路径工具 ====================
-def eta_display(slot, now=None, updated_at=None):
+def terminate_all_processes(app_dir_path=None, self_pid=None):
+    """【全部终止】只清理【能确认属于本项目】的残留进程与锁文件，绝不误杀别的程序。
+
+    2026-11-24 用户强调"不要把我的别的进程也暂停掉"，故采用严格白名单：
+      1. 测试 exe：进程路径必须在本项目目录内（dist\\星际猎人测试仪.exe）
+      2. python：命令行必须同时含【本项目目录】和【本项目脚本名】
+      3. adb：**不强杀系统 adb.exe**（MuMu/其它工具共用），只对本项目配置的 adb
+         执行优雅 `kill-server`；没有配置则跳过，绝不碰其它 adb 进程
+      4. 锁文件：只删本项目目录的 .run_lock
+    并且始终排除 self_pid（不杀 GUI 自己）。宁可漏杀，绝不误杀。
+
+    返回 list[str] 清理动作描述，供 GUI 日志显示。
+    """
+    self_pid = self_pid or os.getpid()
+    base = os.path.abspath(app_dir_path or app_dir())
+    acts = []
+    if os.name != "nt":
+        return ["当前非 Windows，跳过（请用任务管理器手动清理）"]
+
+    def _safe_out(r):
+        # PowerShell 输出可能含中文 GBK，容错解码避免 reader 线程异常
+        raw = r.stdout or b""
+        return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+
+    # 收集【能确认属于本项目】的进程（严格白名单，防误杀）
+    victims = []
+    try:
+        import psutil
+        root_norm = os.path.normcase(base)
+        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+            try:
+                info = proc.info
+                pid = info["pid"]
+                if pid == self_pid:
+                    continue                      # 绝不杀自己
+                name = (info.get("name") or "").lower()
+                exe = info.get("exe") or ""
+                cmd = " ".join(info.get("cmdline") or [])
+                exe_norm = os.path.normcase(exe)
+                exe_in_root = bool(exe) and exe_norm.startswith(root_norm + os.sep)
+                # 判定 1：测试 exe，且可执行文件就在本项目目录内
+                is_our_exe = ("星际猎人测试仪" in name) and exe_in_root
+                # 判定 2：python 进程，命令行同时含项目路径和本项目脚本名
+                is_our_py = (name.startswith("python") and root_norm in os.path.normcase(cmd)
+                             and ("lagrange_upgrade.py" in cmd or "tester.py" in cmd))
+                if is_our_exe or is_our_py:
+                    victims.append((pid, name, "exe" if is_our_exe else "python"))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except ImportError:
+        # 兜底：无 psutil 时用 PowerShell，但同样严格限定项目路径
+        base_lit = base.replace("'", "''")
+        ps = (
+            "$me=" + str(self_pid) + "; $root='" + base_lit + "'; "
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "  $_.ProcessId -ne $me -and ("
+            "    (($_.Name -like '*星际猎人测试仪*') -and ($_.ExecutablePath -like ($root+'\\*'))) -or "
+            "    (($_.Name -like 'python*') -and ($_.CommandLine -like ('*'+$root+'*')) -and "
+            "      ($_.CommandLine -match 'lagrange_upgrade\\.py|tester\\.py'))"
+            "  )"
+            "} | ForEach-Object { 'KILL ' + $_.ProcessId + ' ' + $_.Name }"
+        )
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, timeout=15,
+                               creationflags=CREATE_NO_WINDOW)
+            for l in _safe_out(r).splitlines():
+                parts = l.strip().split(" ", 2)
+                if len(parts) >= 2 and parts[0] == "KILL":
+                    victims.append((parts[1], parts[2] if len(parts) > 2 else "", "fallback"))
+        except Exception as e:
+            acts.append(f"扫描残留进程失败: {e}")
+
+    killed = []
+    for pid, name, kind in victims:
+        try:
+            p = psutil.Process(int(pid))
+            p.terminate()
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                p.kill()
+            killed.append((pid, name, kind))
+        except Exception:
+            # psutil 不可用时兜底 taskkill 单个 PID（不是 /IM 全局杀）
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=8,
+                               creationflags=CREATE_NO_WINDOW)
+                killed.append((pid, name, kind))
+            except Exception:
+                pass
+    acts.append(f"本项目残留进程 {len(killed)} 个已结束" if killed else "本项目无残留进程")
+    for pid, name, kind in killed:
+        acts.append(f"  PID {pid} ({name}, {kind})")   # 逐个列出，便于核对
+
+    # adb：只对本项目配置的 adb 做优雅 kill-server；系统里其它 adb 进程一概不碰
+    try:
+        adb_path = ""
+        cfg_path = os.path.join(base, "config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            adb_path = str((cfg.get("adb_path") or "").strip())
+        if not adb_path:
+            try:
+                from adb_locator import find_adb
+                adb_path = find_adb(cfg) or ""
+            except Exception:
+                adb_path = ""
+        if adb_path and os.path.isfile(adb_path):
+            r = subprocess.run([adb_path, "kill-server"],
+                               capture_output=True, timeout=10,
+                               creationflags=CREATE_NO_WINDOW)
+            acts.append(f"已优雅停止本项目 adb server（{os.path.basename(adb_path)}）"
+                        if r.returncode == 0 else "本项目 adb server 未在运行")
+        else:
+            acts.append("未配置本项目 adb，跳过（不动系统其它 adb）")
+    except Exception as e:
+        acts.append(f"停止本项目 adb 失败: {e}")
+
+    # 锁文件：只删本项目目录
+    for fn in (".run_lock", os.path.join("dist", ".run_lock")):
+        p = os.path.join(base, fn)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                acts.append(f"已删锁 {fn}")
+        except Exception as e:
+            acts.append(f"删锁 {fn} 失败: {e}")
+    return acts
+
+
+def eta_display(slot, now=None):
     """纯函数：把 state.json 的一条倒计时换算成 (显示文字, 是否活跃)。
 
     供 GUI 倒计时条使用，也便于单测覆盖各种边界（过期 / 陈旧 / 坏数据）。
@@ -187,8 +320,7 @@ def eta_display(slot, now=None, updated_at=None):
     if base is None:
         return "--:--:--", False
     # 关键（2026-11-23 bug 修复）：不能用「距上次写入时间」判陈旧！
-    # 脚本静默等待 1 小时不写文件是正常行为，那时 upgrade_at 已过 10 分钟，
-    # 若据此判「数据已过期」会把正常长倒计时误报掉。
+    # 脚本静默等待 1 小时不写文件是正常行为，若据此判「数据已过期」会误报。
     # 正确语义：at 时刻读到还剩 sec 秒 → 完成时刻 = at + sec。
     #   还没到完成时刻 → 倒计时有效（无论 at 多久以前）；
     #   刚过完成时刻 10 分钟内 → 已完成；超过 10 分钟 → 数据已过期。
@@ -469,10 +601,11 @@ ACTIONS = [
     ("③ 截图", "shot", "截当前画面并在右侧预览", "基础检测", False),
     ("④ 整屏 OCR", "scan", "识别整屏文字并标注坐标", "基础检测", False),
     ("⑤ 图标校准", "icons", "纯图标入口检测，生成标注图与活动区放大图", "基础检测", False),
+    ("⑥ 扫描全部 ADB", "adbs", "全盘找 adb.exe，逐个测版本 / 可用性 / 在线", "基础检测", False),
 
-    ("⑥ 日常领取", "daily", "任务 / 活动 / 邮件三段领取 ＋ 回执", "业务功能", False),
-    ("⑦ 升级循环", "autoup", "队列空位自动补位，长期挂机", "业务功能", True),
-    ("⑧ 一体化", "all", "先领取，再进入升级循环", "业务功能", True),
+    ("⑦ 日常领取", "daily", "任务 / 活动 / 邮件三段领取 ＋ 回执", "业务功能", False),
+    ("⑧ 升级循环", "autoup", "队列空位自动补位，长期挂机", "业务功能", True),
+    ("⑨ 一体化", "all", "先领取，再进入升级循环", "业务功能", True),
 ]
 
 
@@ -877,6 +1010,11 @@ def run_gui():
                          state="disabled", command=lambda: stop_task())
     stop_btn.pack(fill="x", padx=10, pady=2)
 
+    tk.Button(ctrl, text="☠ 全部终止（清残留进程+锁）", bg="#6b2d2d", fg="#ffb4ad",
+              activebackground="#8a3838", activeforeground="#ffcfc9",
+              relief="flat", font=FONT, padx=14, pady=6, cursor="hand2",
+              command=lambda: stop_all_task()).pack(fill="x", padx=10, pady=2)
+
     tk.Button(ctrl, text="一键全测（自检＋状态＋截图）", bg=BG_LOG, fg=ACCENT,
               activebackground="#2f3540", activeforeground=ACCENT,
               relief="flat", font=FONT, padx=14, pady=6, cursor="hand2",
@@ -993,6 +1131,28 @@ def run_gui():
             except Exception as e:
                 append_log(f"[测试仪] 停止失败: {e}\n", "err")
 
+    def stop_all_task():
+        """【全部终止】一键清掉所有残留进程（含孤儿）/ adb / 锁文件，不影响本 GUI。"""
+        append_log("\n[测试仪] 全部终止：正在清理所有残留进程…\n", "warn")
+        try:
+            acts = terminate_all_processes(app_dir_path=BASE_DIR, self_pid=os.getpid())
+            for a in acts:
+                append_log(f"  - {a}\n", "ok" if "失败" not in a else "err")
+            # 清掉本 GUI 记录的子进程引用（进程可能已被上面的清理杀掉）
+            p = proc_holder.get("proc")
+            if p is not None:
+                try:
+                    if p.poll() is None:
+                        p.kill()
+                except Exception:
+                    pass
+                proc_holder["proc"] = None
+            set_running(False)
+            set_status("已全部终止", WARN)
+            append_log("[测试仪] 全部终止完成。\n", "ok")
+        except Exception as e:
+            append_log(f"[测试仪] 全部终止失败: {e}\n", "err")
+
     def start_cmd(cmd, desc, is_long, on_done=None):
         if running["flag"]:
             return
@@ -1082,7 +1242,6 @@ def run_gui():
         slots = d.get("upgrade_etas") if isinstance(d, dict) else None
         if not isinstance(slots, list):
             slots = []
-        updated_at = d.get("upgrade_at") if isinstance(d, dict) else None
         now = time.time()
         any_active = False
         for i, (_name, _time) in enumerate(eta_slots):
@@ -1093,7 +1252,7 @@ def run_gui():
             slot = slots[i] if isinstance(slots[i], dict) else {}
             name = str(slot.get("name") or "").strip()
             _name.configure(text=name[:12] if name else f"队列 {i + 1}")
-            text, active = eta_display(slot, now=now, updated_at=updated_at)
+            text, active = eta_display(slot, now=now)
             any_active = any_active or active
             _time.configure(text=text, fg=(OK if active else FG_DIM))
         eta_dot.configure(fg=OK if any_active else "#5a636f")

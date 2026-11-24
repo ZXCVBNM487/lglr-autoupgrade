@@ -693,6 +693,87 @@ class TestRobustness(unittest.TestCase):
         self.assertFalse(tester._parent_pid_alive(99999999))
 
 
+class TestTerminateAll(unittest.TestCase):
+    """2026-11-24「全部终止」按钮：清残留但不杀自己。"""
+
+    def test_wired_in_gui(self):
+        import tester, inspect
+        src = inspect.getsource(tester.run_gui)
+        self.assertIn("全部终止", src)
+        self.assertIn("stop_all_task()", src)
+        self.assertIn("terminate_all_processes", inspect.getsource(tester))
+
+    def test_skips_self_pid(self):
+        """必须排除 self_pid，否则 dist 版 GUI 会杀掉自己。"""
+        import tester, inspect
+        src = inspect.getsource(tester.terminate_all_processes)
+        self.assertIn("ProcessId -ne $me", src)
+        self.assertIn("str(self_pid)", src)
+
+    def test_scope_limited_to_project(self):
+        """【防误杀】exe 限定项目目录、python 同时含项目路径+脚本名。"""
+        import tester, inspect
+        src = inspect.getsource(tester.terminate_all_processes)
+        self.assertIn("psutil.process_iter", src)
+        self.assertIn("exe_norm.startswith(root_norm", src)   # exe 路径白名单
+        self.assertIn("root_norm in os.path.normcase(cmd)", src)  # python 路径白名单
+        self.assertNotIn('"/IM"', src)                  # 无 taskkill /IM 全局杀
+
+    def test_adb_not_globally_killed(self):
+        """【防误杀】绝不 taskkill 系统所有 adb.exe，只对本项目的 adb kill-server。"""
+        import tester, inspect
+        src = inspect.getsource(tester.terminate_all_processes)
+        self.assertIn("kill-server", src)
+        self.assertNotIn('"/IM"', src)         # 绝不 taskkill /IM 全局杀所有 adb
+        self.assertNotIn('"adb.exe"', src)     # 不硬编码系统 adb 进程名
+
+    def test_removes_both_lock_locations(self):
+        """锁文件只删本项目根和 dist 两处。"""
+        import tester, inspect
+        src = inspect.getsource(tester.terminate_all_processes)
+        self.assertIn(".run_lock", src)
+        self.assertIn('os.path.join("dist", ".run_lock")', src)
+
+
+class TestScanAllAdbs(unittest.TestCase):
+    """2026-11-24 全盘 ADB 扫描：14 个 adb.exe 全部覆盖、逐个验证。"""
+
+    def test_static_table_covers_all_scanned_adbs(self):
+        """全盘扫描发现的 14 个 adb.exe 必须都在静态表里（不再遗漏）。"""
+        import adb_locator as A
+        known = {os.path.normcase(os.path.normpath(p)) for p in A._STATIC}
+        # 用户特别指出的两个 MuMu 路径 + 之前遗漏的 platform-tools
+        must = [
+            r"D:\FeverApps\MuMuFever\nx_device\12.0\shell\adb.exe",
+            r"D:\FeverApps\MuMuFever\nx_main\adb.exe",
+            r"E:\AndroidBuild\platform-tools-latest-windows\platform-tools\adb.exe",
+            r"E:\项目文件2\platform-tools\adb.exe",
+            r"E:\项目文件2\android_usb_assistant\platform-tools\adb.exe",
+            r"C:\Program Files (x86)\Android\android-sdk\platform-tools\adb.exe",
+        ]
+        for p in must:
+            with self.subTest(p=p):
+                self.assertIn(os.path.normcase(os.path.normpath(p)), known)
+
+    def test_scan_all_adbs_structure(self):
+        """scan_all_adbs 返回结构完整（路径/版本/可用/在线/来源）。"""
+        import adb_locator as A
+        # 只测静态表部分（timeout=0 跳过目录扫描），不实际跑全部 adb 以节省时间
+        res = A.scan_all_adbs(timeout=0.01)
+        self.assertIsInstance(res, list)
+        for r in res:
+            for k in ("path", "size", "version", "usable", "devices",
+                      "online", "connect_ok", "source"):
+                self.assertIn(k, r)
+
+    def test_adbs_command_wired(self):
+        import inspect
+        src = inspect.getsource(L.main)
+        self.assertIn('cmd == "adbs"', src)
+        self.assertIn('"adbs"', src)
+        self.assertIn("cmd_adbs", inspect.getsource(L))
+
+
 class TestDeviceSelection(unittest.TestCase):
     """设备模式重构：serial-only 选择逻辑与 adb devices 解析（纯逻辑，无需设备）。"""
 
@@ -1305,6 +1386,118 @@ class TestAutoUpEnterBaseListView(unittest.TestCase):
         self.assertFalse(any(c[0] == "tap" for c in fake.calls))
 
 
+class TestCodeReviewFixes(unittest.TestCase):
+    """2026-11-24 代码审查修复的回归测试。"""
+
+    def test_queue_times_filters_low_score(self):
+        """P1-2：低分 OCR 幻影倒计时不能污染队列状态（否则静默空等数小时）。"""
+        a = _FakeAdb(1600, 900)
+        items = [(1000, 852, "00:33:42", 0.2),   # 低分幻影
+                 (1265, 852, "02:00:40", 0.85)]  # 真实
+        self.assertEqual(L._au_queue_times(items, a), [7240])
+
+    def test_close_event_banner_handles_none_img(self):
+        """P1-1：截图失败 img=None 时不能抛 TypeError（会让挂机停摆）。"""
+        fake = _FakeAdb(1600, 900)
+        pos = L._au_close_event_banner(fake, None)
+        self.assertEqual(len(pos), 2)
+        self.assertTrue(any(c[0] == "tap" for c in fake.calls))
+
+    def test_publish_skips_bad_sec(self):
+        """P2-6：一条脏秒数不能导致两条 ETA 全丢。"""
+        import json, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            orig = L._state_file
+            L._state_file = lambda: p
+            try:
+                L._publish_upgrade_etas(["bad", 2022], ["坏数据", "金属炼化"], 2)
+                st = json.load(open(p, encoding="utf-8"))
+                self.assertEqual(len(st["upgrade_etas"]), 1)
+                self.assertEqual(st["upgrade_etas"][0]["sec"], 2022)
+            finally:
+                L._state_file = orig
+
+    def test_save_state_atomic_no_tmp_left(self):
+        """P2-4：原子写后不留 .tmp，且内容可正常读回。"""
+        import json, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "state.json")
+            orig = L._state_file
+            L._state_file = lambda: p
+            try:
+                L._save_state({"k": "v"})
+                self.assertFalse(os.path.exists(p + ".tmp"))
+                self.assertEqual(json.load(open(p, encoding="utf-8"))["k"], "v")
+            finally:
+                L._state_file = orig
+
+    def test_close_panel_taps_left_outside(self):
+        """P-实机：建筑详情是右侧抽屉，关闭必须点左侧空白（旧点 60% 宽落在面板内死循环）。"""
+        import inspect
+        src = inspect.getsource(L._au_close_panel)
+        self.assertIn("0.28", src)      # 左侧 28% 宽
+        self.assertIn("0.61", src)      # 61% 高
+        self.assertNotIn("adb.w * 0.6", src)
+
+    def test_no_legacy_upgrade_route_in_loop(self):
+        """确认旧单建筑升级路线未回流。"""
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        self.assertNotIn("_au_open_target(", src)
+        self.assertNotIn("_au_tap_upgrade(", src)
+
+
+class TestQueuePairsByColumn(unittest.TestCase):
+    """2026-11-24 修复：倒计时与建筑名按 x 坐标（列）配对，左右不能颠倒。"""
+
+    def setUp(self):
+        self.adb = _FakeAdb(1600, 900)
+
+    def test_pairs_by_x_not_ocr_order(self):
+        # OCR 返回顺序故意打乱：右边的先出现、左边的后出现（模拟"搞反"场景）
+        items = [
+            (1265, 852, "00:33:42", 0.87),   # 右边倒计时，OCR 先给
+            (1086, 852, "02:00:40", 0.83),   # 左边倒计时，OCR 后给
+            (1265, 831, "金属炼化工", 0.83),  # 右边名字
+            (1089, 831, "通用港口4", 0.77),   # 左边名字
+        ]
+        pairs = L._au_queue_pairs(items, self.adb)
+        # 结果必须按 x 从左到右：左边是通用港口4/02:00:40，右边是金属炼化/00:33:42
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0][1], "通用港口4")
+        self.assertEqual(pairs[0][0], 7240)
+        self.assertEqual(pairs[1][1], "金属炼化工")
+        self.assertEqual(pairs[1][0], 2022)
+        self.assertLess(pairs[0][2], pairs[1][2])   # 左列 x < 右列 x
+
+    def test_order_swapped_buildings(self):
+        # 游戏里左右建筑互换：金属炼化在左、通用港口在右 → 也要按 x 正确跟随
+        items = [
+            (1069, 852, "01:30:00", 0.8), (1255, 852, "00:20:27", 0.8),
+            (1060, 831, "金属炼化工", 0.8), (1258, 831, "通用港口4", 0.8),
+        ]
+        pairs = L._au_queue_pairs(items, self.adb)
+        self.assertEqual(pairs[0][1], "金属炼化工")
+        self.assertEqual(pairs[0][0], 5400)
+        self.assertEqual(pairs[1][1], "通用港口4")
+        self.assertEqual(pairs[1][0], 1227)
+
+    def test_name_missing_keeps_blank(self):
+        # 某条名字漏读：时间仍保留，名字留空，不错配到别的列
+        items = [(1086, 852, "02:00:40", 0.83), (1265, 852, "00:33:42", 0.87),
+                 (1089, 831, "通用港口4", 0.77)]
+        pairs = L._au_queue_pairs(items, self.adb)
+        self.assertEqual(pairs[0][1], "通用港口4")
+        self.assertEqual(pairs[1][1], "")
+
+    def test_loop_uses_column_pairs(self):
+        import inspect
+        src = inspect.getsource(L.cmd_autoup)
+        self.assertIn("_au_queue_pairs(items, adb)", src)
+        self.assertNotIn("qtimes[i]", src)
+
+
 class TestEtaDisplayEdgeCases(unittest.TestCase):
     """GUI 底部倒计时的递减纯函数：覆盖过期/陈旧/坏数据等边界，防 bug。"""
 
@@ -1338,8 +1531,7 @@ class TestEtaDisplayEdgeCases(unittest.TestCase):
         """核心 bug 修复：脚本静默等待 1 小时不写文件，长倒计时不能误报过期。
         完成时刻 = at + sec，只要没到就有效，与距上次写入多久无关。"""
         # 2 小时前读到还剩 3 小时 → 现在还有 1 小时，必须仍活跃
-        text, active = self.eta({"sec": 10800, "at": self._at(-7200)},
-                                updated_at=self._at(-7200))
+        text, active = self.eta({"sec": 10800, "at": self._at(-7200)})
         self.assertTrue(active, text)
         self.assertTrue(text.startswith("00:59:"), text)
 

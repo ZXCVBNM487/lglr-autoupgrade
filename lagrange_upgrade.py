@@ -9,6 +9,7 @@
   scan      全屏 OCR 文字坐标标注，生成 scan_标注.png
   icons     纯图标入口校准：检测注册表，生成 icons_标注.png / icons_活动区.png
   points    点位配置自检：读取 points.json，列出双入口与 17 个标注点
+  adbs      全盘扫描所有 adb.exe，逐个测版本 / 可用性 / 在线设备
   times     识别屏幕上的倒计时
   mark      生成界面标注图
   tap X Y   测试点击某坐标
@@ -1574,6 +1575,39 @@ def cmd_icons(adb):
     return rows
 
 
+def cmd_adbs():
+    """全盘扫描所有 adb.exe，逐个测版本 / 可用性 / 在线设备（2026-11-24 新增）。"""
+    from adb_locator import scan_all_adbs
+    cfg_serial = str((CONFIG.get("device", {}) or {}).get("serial") or "").strip()
+    print(f"{C.ACCENT}全盘 ADB 扫描{C.R}  逐个测版本 / 可用性 / 在线设备"
+          + (f"  ·  目标设备 {cfg_serial}" if cfg_serial else ""))
+    t0 = time.time()
+    res = scan_all_adbs(timeout=12, connect_serial=cfg_serial)
+    print(f"{C.ACCENT}耗时 {time.time()-t0:.1f}s{C.R}  找到 {len(res)} 个 adb.exe")
+    print("-" * 78)
+    for i, r in enumerate(res, 1):
+        mark = "OK " if r["usable"] else "BAD"
+        ver = r["version"].replace("Version ", "") or "版本未知"
+        dev = ",".join(r["devices"]) if r["devices"] else "无在线设备"
+        col = C.OK if r["usable"] and r["online"] else C.WARN
+        print(f"{col}{mark}{C.R} {ver:22s} 在线: {dev:26s} {r['source']:8s} {r['path']}")
+    usable = sum(1 for r in res if r["usable"])
+    online = sum(1 for r in res if r["online"])
+    print("-" * 78)
+    print(f"汇总：可用 {usable}/{len(res)} · 能读到在线设备 {online}/{len(res)}")
+    # 把结果写到 logs 供 GUI / 排障查看
+    try:
+        out = os.path.join(app_dir(), "logs", "adb_scan.json")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump({"scanned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                       "target": cfg_serial, "results": res}, f,
+                      ensure_ascii=False, indent=2)
+        print(f"结果已存 {out}")
+    except Exception as e:
+        log(f"写 adb_scan.json 失败：{e}", "warn")
+
+
 def cmd_points():
     """点位配置自检：逐项核对设计坐标/实机坐标是否一致、验证文字与资源是否齐全。"""
     d = load_points()
@@ -2030,13 +2064,19 @@ def _au_has_event_banner(items):
 
 
 def _au_close_event_banner(adb, img):
-    """关闭活动弹窗：优先右上 X 模板（限定上半屏），兜底 close_x 注册表坐标。
-    绝不点「前往查看」，避免跳进活动页打断自动升级 / 日常。"""
-    pos = find_close_x(adb, img,
-                       search=(0, 0, adb.w, scale_box(adb, (0, 0, 0, 320))[3]))
+    """关闭活动弹窗：优先右上 X 模板（限定上半屏），兜底注册表坐标。
+    绝不点「前往查看」，避免跳进活动页打断自动升级 / 日常。
+    img=None（截图失败）时跳过模板、直接用校准兜底坐标，不抛异常。"""
+    pos = None
+    if img is not None:
+        pos = find_close_x(adb, img,
+                           search=(0, 0, adb.w, scale_box(adb, (0, 0, 0, 320))[3]))
     if pos is None:
-        pos = scale_box(adb, (*ICON_ONLY_ENTRIES["close_x"]["fallback"], 0, 0))[:2]
-        log("活动弹窗 X 未模板命中，用 close_x 注册表兜底坐标", "warn")
+        # 应用 config.json 的 close_x 校准覆盖（与 find_icon_entry 口径一致）
+        cfg = icon_entry_cfg("close_x") or ICON_ONLY_ENTRIES["close_x"]
+        fallback = cfg.get("fallback") or ICON_ONLY_ENTRIES["close_x"]["fallback"]
+        pos = scale_box(adb, (*fallback, 0, 0))[:2]
+        log("活动弹窗 X 无模板/截图，用 close_x 兜底坐标", "warn")
     adb.tap(*pos)
     time.sleep(2)
     return pos
@@ -2199,9 +2239,15 @@ def _load_state():
 
 
 def _save_state(d):
+    """原子写：先写临时文件再 os.replace，避免 GUI 每秒读取时读到半截 JSON。"""
     try:
-        with open(_state_file(), "w", encoding="utf-8") as f:
+        path = _state_file()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except Exception as e:
         log(f"写入 state.json 失败：{e}", "warn")
 
@@ -2239,37 +2285,46 @@ def _publish_upgrade_etas(times, names=None, count=None):
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         slots = []
         for i, sec in enumerate(list(times or [])[:2]):
+            try:
+                sec_i = int(sec)
+            except Exception:
+                log(f"升级倒计时第 {i+1} 条秒数无效（{sec!r}），跳过该条", "warn")
+                continue
             slots.append({
-                "sec": int(sec),
+                "sec": sec_i,
                 "name": str((names or [])[i]) if names and i < len(names) else "",
                 "at": now,
             })
         st["upgrade_etas"] = slots
         st["upgrade_count"] = int(count) if count is not None else len(slots)
-        st["upgrade_at"] = now
         _save_state(st)
     except Exception as e:
         log(f"写入升级倒计时到 state.json 失败：{e}", "warn")
 
 
 def _au_close_panel(adb):
-    """关闭建筑详情面板：优先图标模板找 X；否则点面板外空白区（建筑详情是左侧抽屉，
-    点右侧基地视图即收起，回到星图）。关闭后验证面板已收起，否则再点一次外侧。"""
+    """关闭建筑详情面板：优先图标模板找 X；否则点面板【外侧】空白区收起。
+
+    2026-11-24 实机修正：当前游戏建筑详情面板是【右侧抽屉】（占右半屏，
+    含等级/全选/对接信息等），旧代码点屏幕 60% 宽正好落在面板内部，
+    导致「关闭→仍在→再关→仍在」无限空转、卡死升级循环。
+    实测点左侧空白 (30%宽, 61%高) = (450,550)@1600x900 可稳定收起。
+    """
     img = adb.screenshot()
     pos = None
     if img is not None:
         pos = find_close_x(adb, img, search=(0, 0, adb.w, scale_box(adb, (0, 0, 0, 320))[3]))
     if pos is None:
-        # 左侧抽屉面板：点右侧基地视图空白区收起（约屏幕 60% 宽、50% 高处）
-        pos = (int(adb.w * 0.6), int(adb.h * 0.5))
-        log("未模板命中关闭X，点面板外空白区收起", "warn")
+        # 右侧抽屉面板 → 点【左侧】基地视图空白区收起（实测 450,550@1600x900）
+        pos = (int(adb.w * 0.28), int(adb.h * 0.61))
+        log("未模板命中关闭X，点面板外（左侧）空白区收起", "warn")
     adb.tap(*pos)
     time.sleep(1.5)
-    # 验证：面板若还在（仍能识别到详情特征）则再点一次外侧
+    # 验证：面板若还在则再点一次左侧外侧
     img2 = adb.screenshot()
     if img2 is not None and _au_in_building_detail(_au_ocr_all(img2)):
-        log("面板似乎未关闭，再点一次外侧", "warn")
-        adb.tap(int(adb.w * 0.6), int(adb.h * 0.5))
+        log("面板似乎未关闭，再点一次左侧外侧", "warn")
+        adb.tap(int(adb.w * 0.28), int(adb.h * 0.61))
         time.sleep(1.5)
 
 
@@ -2386,13 +2441,61 @@ def _au_queue_times(items, adb=None):
     adb 传入时按实际分辨率换算底部阈值，保证模拟器（720p/1080p/1440p）同样生效。"""
     bottom = int(adb.h * _AU_TIMER_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_TIMER_BOTTOM_Y
     times = []
-    for _, cy, text, _ in items:
-        if cy < bottom:
+    for _, cy, text, sc in items or []:
+        # 与队列函数族（_au_queue_full/_au_queue_pairs/_au_upgrade_state）口径统一：
+        # 过滤低分 OCR 误读（否则幻影倒计时会污染 count→脚本静默空等数小时）。
+        if cy < bottom or sc < 0.4:
             continue
         sec = parse_seconds(text)
         if sec and sec >= 30:
             times.append(sec)
     return times
+
+
+def _au_queue_pairs(items, adb=None):
+    """把底部队列的【倒计时 + 建筑名】按 x 坐标（列）配对，返回 [(sec, name, x), ...]。
+
+    2026-11-24 实机 bug：旧代码用 OCR 返回顺序把 qtimes[i] 配 qnames[i]，
+    OCR 顺序不稳定 / 某条漏读时就会把名字和时间配反（用户反馈"倒计时搞反"）。
+    正确做法：倒计时在 y≈852、建筑名在 y≈831，同一列 x 对齐——
+    每条倒计时找 x 最接近的建筑名（容差 120px 设计基准），找不到名字就留空。
+
+    返回按 x 从左到右排序，条数 = 读到的倒计时数（最多 2）。
+    """
+    bottom = int(adb.h * _AU_TIMER_BOTTOM_Y / DESIGN_H) if adb is not None else _AU_TIMER_BOTTOM_Y
+    tol = 120 * (adb.w / DESIGN_W) if adb is not None else 120
+    timers, names = [], []
+    for cx, cy, text, sc in items or []:
+        if cy < bottom or sc < 0.4:
+            continue
+        t = str(text).strip()
+        sec = parse_seconds(t)
+        if sec and sec >= 30:
+            timers.append((int(cx), sec))
+            continue
+        # 建筑名：排除倒计时 / 队列比例 / 导航词 / 纯符号
+        if re.fullmatch(r"[\d:]+", t) or re.fullmatch(r"\d+/\d+", t.replace(" ", "")):
+            continue
+        if t in _AU_NAV_WORDS or len(t) < 2:
+            continue
+        names.append((int(cx), t))
+    timers.sort(key=lambda p: p[0])
+    result = []
+    used = set()
+    for x, sec in timers[:2]:
+        best_i, best_d = None, 1e9
+        for i, (nx, nm) in enumerate(names):
+            if i in used:
+                continue
+            d = abs(nx - x)
+            if d < best_d:
+                best_d, best_i = d, i
+        nm = ""
+        if best_i is not None and best_d <= tol:
+            nm = names[best_i][1]
+            used.add(best_i)
+        result.append((sec, nm, x))
+    return result
 
 
 def _au_upgrade_state(items, adb=None):
@@ -2637,9 +2740,10 @@ def _au_tap_upgrade(adb, qq, items):
 
 
 def cmd_autoup(adb, qq):
-    """一键升级自动循环入口：倒计时驱动，队列先到先补。
-    真实 UI 流程：基地建设页底部队列栏读倒计时 → 满载则等待 → 有空位则打开目标建筑详情
-    → 点『升至满级/连续升级设置』→ 处理等级选择/资源不足/队列已满。"""
+    """一键升级自动循环入口：倒计时驱动，队列先到先补（只走游戏内「一键升级」面板）。
+    流程：3D 全景视图第一时间数出几个在升级 → 2 个则看倒计时静默等待、1 个则看这一个
+    再去点一次一键升级补位、0 个则点一次 → 在建筑列表视图点「一键升级」→ 点橙色「升级」→ 收起回全景。
+    不进建筑详情、不走普通升级补位；同时把两条倒计时写入 state.json 供 GUI 显示。"""
     # 模拟器 / 真机都支持：按 config.device.serial 选设备（留空自动挑在线通道）
     _pick_device_by_pref(adb)
 
@@ -2710,7 +2814,7 @@ def cmd_autoup(adb, qq):
                 #     挡住基地页 → 点右上 X 关掉；不点「前往查看」，避免跳进活动打断循环。
                 if _au_has_event_banner(items):
                     pos = _au_close_event_banner(adb, img)
-                    log(f"检测到「暗流汹涌」活动弹窗 → 点右上 X 关闭 {pos}", "warn")
+                    log(f"检测到活动弹窗（前往查看）→ 点右上 X 关闭 {pos}", "warn")
                     fails = 0
                     progress = True
                     continue
@@ -2732,12 +2836,12 @@ def cmd_autoup(adb, qq):
                 # 把读到的倒计时发布给 GUI 底部倒计时条（GUI 定时读 state.json）。
                 # 只在可靠读到队列时发布，避免建筑列表视图的误读污染显示。
                 if readable:
-                    qnames = [t for _, cy, t, _ in items
-                              if cy >= int(adb.h * _AU_TIMER_BOTTOM_Y / DESIGN_H)
-                              and not re.fullmatch(r"[\d:]+", str(t).strip())
-                              and not re.fullmatch(r"\d+/\d+", str(t).replace(" ", ""))
-                              and str(t).strip() not in _AU_NAV_WORDS][:2]
-                    _publish_upgrade_etas(qtimes, qnames, count)
+                    # 按 x 坐标（列）配对倒计时与建筑名，避免 OCR 顺序不稳导致"搞反"。
+                    # 写入 state 的 count 用实际配对条数，保证 upgrade_count 与
+                    # upgrade_etas 自洽（count 是循环判定口径，与本处显示口径不同）。
+                    pairs = _au_queue_pairs(items, adb)
+                    _publish_upgrade_etas([p[0] for p in pairs],
+                                          [p[1] for p in pairs], len(pairs))
 
                 # 1a) 数出"几个在升级"后分流（用户定稿 2026-11-23）：
                 #     2 个在升级 → 看倒计时还有多久，不管它（静默等待）
@@ -3050,9 +3154,9 @@ def _daily_ensure_starmap(adb):
             adb.tap(int(adb.w * 0.3), int(adb.h * 0.5))
             time.sleep(1.5)
             continue
-        if _au_has_event_banner(items):         # 「暗流汹涌」活动弹窗 → 右上 X 关掉，不点前往查看
+        if _au_has_event_banner(items):         # 活动弹窗 → 右上 X 关掉，不点前往查看
             pos = _au_close_event_banner(adb, img)
-            log(f"关闭「暗流汹涌」活动弹窗：{pos}", "warn")
+            log(f"关闭活动弹窗（前往查看）：{pos}", "warn")
             continue
         if "奖励选择" in texts:                 # 一键领取后的奖励挑选弹窗 → 关掉，不替用户选
             x, y = scale_box(adb, (1678, 79, 0, 0))[:2]
@@ -3525,10 +3629,14 @@ def main():
         banner()
         cmd_points()
         return
+    if cmd == "adbs":
+        banner()
+        cmd_adbs()
+        return
 
     # 无参数 / 未知命令：只打印用法，不连 ADB（避免因设备不在线而白等）
-    _VALID_CMDS = ("check", "scan", "shot", "icons", "points", "times", "status", "mark",
-                   "tap", "autoup", "daily", "all")
+    _VALID_CMDS = ("check", "scan", "shot", "icons", "points", "adbs", "times", "status",
+                   "mark", "tap", "autoup", "daily", "all")
     if cmd not in _VALID_CMDS:
         banner()
         print(__doc__)
