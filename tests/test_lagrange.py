@@ -693,6 +693,81 @@ class TestRobustness(unittest.TestCase):
         self.assertFalse(tester._parent_pid_alive(99999999))
 
 
+class TestResourceStrategy(unittest.TestCase):
+    """2026-11-25：一键升级面板「资源消耗策略」可配置切换。"""
+
+    def setUp(self):
+        import tester
+        self.T = tester
+
+    def test_gui_strategy_display(self):
+        tester = self.T
+        self.assertEqual(tester.strategy_from_cfg({}), "填满建造队列优先")
+        self.assertEqual(tester.strategy_from_cfg(
+            {"au_resource_strategy": "基地升级优先"}), "基地升级优先")
+        self.assertEqual(tester.strategy_from_cfg(
+            {"au_resource_strategy": ""}), "不切换（保持游戏设置）")
+
+    def test_default_in_core(self):
+        self.assertEqual(L.DEFAULT_CONFIG["au_resource_strategy"], "填满建造队列优先")
+        self.assertIn("基地升级优先", L._AU_STRATEGY_OPTIONS)
+        self.assertIn("填满建造队列优先", L._AU_STRATEGY_OPTIONS)
+
+    def test_disabled_does_nothing(self):
+        """空策略=不切换：不点任何东西。"""
+        import unittest.mock as mock
+        calls = {"tap": 0}
+        class FakeAdb:
+            def tap(self, *a): calls["tap"] += 1
+        r = L._au_ensure_strategy(FakeAdb(), [], "")
+        self.assertEqual(r, "")
+        self.assertEqual(calls["tap"], 0)
+
+    def test_already_target_no_tap(self):
+        """当前已是目标策略：不点击。"""
+        import unittest.mock as mock
+        calls = {"tap": 0}
+        class FakeAdb:
+            def tap(self, *a): calls["tap"] += 1
+        items = [(894, 741, "填满建造队列优先", 0.8)]
+        r = L._au_ensure_strategy(FakeAdb(), items, "填满建造队列优先")
+        self.assertEqual(r, "填满建造队列优先")
+        self.assertEqual(calls["tap"], 0)
+
+    def test_switch_when_mismatch(self):
+        """当前策略非目标：展开→点目标→验证。用 mock 模拟 OCR 序列。"""
+        import unittest.mock as mock
+        calls = {"tap": []}
+        class FakeAdb:
+            def tap(self, x, y): calls["tap"].append((int(x), int(y)))
+            def screenshot(self): return "img"
+
+        items = [(894, 741, "填满建造队列优先", 0.8)]  # 当前=填满
+        expanded = [(815, 446, "资源消耗策略", 0.8),
+                    (895, 490, "基地升级优先", 0.8),
+                    (894, 541, "填满建造队列优先", 0.8),
+                    (894, 741, "填满建造队列优先", 0.8)]
+        after = [(895, 741, "基地升级优先", 0.85)]
+        with mock.patch.object(L, "_au_ocr_all", side_effect=[expanded, after]), \
+             mock.patch.object(L.time, "sleep", side_effect=lambda s: None):
+            r = L._au_ensure_strategy(FakeAdb(), items, "基地升级优先")
+        self.assertEqual(r, "基地升级优先")
+        self.assertEqual(len(calls["tap"]), 2)   # 展开 + 点选项
+        self.assertEqual(calls["tap"][1], (895, 490))  # 点的就是基地升级优先
+
+    def test_panel_calls_ensure(self):
+        import inspect
+        src = inspect.getsource(L._au_handle_panel)
+        self.assertIn("_au_ensure_strategy(", src)
+
+    def test_gui_has_strategy_control(self):
+        import inspect
+        src = inspect.getsource(self.T.run_gui)
+        self.assertIn("消耗策略", src)
+        self.assertIn("strategy_from_cfg", src)
+        self.assertIn("_on_strategy_change", src)
+
+
 class TestParseSecondsOcrTolerance(unittest.TestCase):
     """2026-11-24 实机：底部倒计时被 OCR 多读尾缀（00:27:093）不能丢。"""
 

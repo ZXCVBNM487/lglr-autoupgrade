@@ -115,6 +115,7 @@ python lagrange_upgrade.py
 **配置**：复制 `config.example.json` 为 `config.json`，按需填写：
 
 - `device.serial`：留空自动挑第一个在线通道；填序列号则只连指定设备（离线时报错退出，不误连）
+- `au_resource_strategy`：一键升级面板「资源消耗策略」——`"填满建造队列优先"`（默认，尽量排满队列）/ `"基地升级优先"`（优先升基地）/ `""`（不切换，保持游戏设置）。脚本每次点升级前 OCR 检查，不符才切换。GUI 有「消耗策略」下拉可直接选
 - `performance.eta_calibrate_every`：静默等待中重读真实倒计时的间隔（秒，默认 3600 = 1小时，0=关闭）。越低越准但越费电
 - `adb_path`：留空则自动寻找模拟器自带 adb（雷电 / MuMu / 夜神等）；也可填完整路径或 `adb` 走系统 `PATH`。**2026-11-24 全盘扫出本机 14 个 adb.exe（全部可用、全部能连真机），已全部补进 `adb_locator.py` 静态表**：含你指定的 MuMu `nx_device/12.0/shell/adb.exe` 与 `nx_main/adb.exe`（v36.0.0）、`E:\AndroidBuild\platform-tools-latest-windows\platform-tools\adb.exe`（v37.0.1）及 E/C 盘多个 platform-tools。GUI 点「⑥ 扫描全部 ADB」或命令行 `adbs` 可随时重新扫描、逐个测版本/可用性/在线状态。
 - `au_target_building`：一键升级循环优先升级的目标建筑名（OCR 模糊匹配，留空则升可见第一个可升设施）

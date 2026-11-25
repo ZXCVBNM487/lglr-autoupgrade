@@ -119,6 +119,12 @@ DEFAULT_CONFIG = {
 
     # 一键升级自动循环：要自动升级的目标建筑名（OCR 模糊匹配，含该名的第一个设施即命中）。
     # 例如 "平台指挥中心" / "资源港口" / "战地指挥中心"。留空则队列有空位时升“当前可见第一个可升设施”。
+    # 一键升级面板的「资源消耗策略」：脚本每次点升级前 OCR 检查当前策略，不符则切换。
+    #   "填满建造队列优先" = 尽量把两条队列都排满（默认）
+    #   "基地升级优先"     = 优先升基地
+    #   ""                 = 不切换，保持游戏当前设置
+    "au_resource_strategy": "填满建造队列优先",
+
     "au_target_building": "",                # 留空=升可见第一个可升设施；填建筑名则优先升它
 
     # 一键升级循环绝不自动升级的建筑名单（OCR 模糊匹配，含该名的设施一律跳过）。
@@ -2420,6 +2426,68 @@ def _au_back_to_panorama(adb):
     log("已收起建筑列表，回到全景视图读两条建造队列倒计时", "step")
 
 
+# 资源消耗策略（一键升级面板下拉框，2026-11-25 实机 OCR 校准）
+# 设计基准 2310×1080；实机 1600×900 换算：收起框(894,741)→(1291,889)
+_AU_STRATEGY_OPTIONS = ("基地升级优先", "填满建造队列优先")
+_AU_STRATEGY_BOX = (1291, 889)        # 收起框点击位置（展开/收起切换）
+
+
+def _au_ensure_strategy(adb, items, target=None):
+    """点升级前检查「资源消耗策略」，与目标不符则切换。不改变其它升级流程。
+
+    target: "基地升级优先" / "填满建造队列优先" / ""(或None)=不动。
+    纯 OCR 驱动：找"XX优先"文字定位；坐标 _AU_STRATEGY_BOX 仅作展开兜底。
+    返回实际使用的策略字符串（或 ""表示未处理）。异常一律吞掉、不影响点升级。
+    """
+    if target is None:
+        target = (CONFIG.get("au_resource_strategy") or "").strip()
+    if not target or target not in _AU_STRATEGY_OPTIONS:
+        return ""
+    try:
+        def _current_strategy(its):
+            # 收起/展开时底部那行"XX优先"的 y 最大（底部框），取最靠下的一条
+            found = [(cx, cy, t) for cx, cy, t, s in its if t in _AU_STRATEGY_OPTIONS]
+            if not found:
+                return "", None
+            found.sort(key=lambda a: a[1])       # y 最大的在最后 = 底部收起框
+            cx, cy, t = found[-1]
+            return t, (cx, cy)
+
+        cur, box = _current_strategy(items)
+        if cur == target:
+            return cur                          # 已是目标，不点
+
+        # 展开下拉（若当前未展开）：底部框 OCR 命中就用它的坐标，否则用校准兜底
+        tap_pt = box if box else scale_box(adb, _AU_STRATEGY_BOX)
+        adb.tap(*tap_pt)
+        time.sleep(0.8)
+        img = adb.screenshot()
+        expanded = _au_ocr_all(img) if img is not None else []
+        # 展开后找目标选项（排除底部收起框那条：取 y 较小、且是目标文字的）
+        opts = [(cx, cy, t) for cx, cy, t, s in expanded if t == target]
+        if not opts:
+            log(f"资源消耗策略：展开后未识别到「{target}」，跳过切换", "warn")
+            # 尝试收起下拉，避免挡住升级按钮
+            adb.tap(*tap_pt)
+            return cur
+        opts.sort(key=lambda a: a[1])
+        cx, cy, _ = opts[0]
+        adb.tap(cx, cy)
+        time.sleep(0.8)
+        # 验证
+        img2 = adb.screenshot()
+        items2 = _au_ocr_all(img2) if img2 is not None else []
+        new, _ = _current_strategy(items2)
+        if new == target:
+            log(f"资源消耗策略已切换为「{target}」", "ok")
+        else:
+            log(f"资源消耗策略切换后读到「{new or '未知'}」（目标「{target}」）", "warn")
+        return new or target
+    except Exception as e:
+        log(f"资源消耗策略切换异常（忽略，继续升级）: {e}", "warn")
+        return ""
+
+
 def _au_handle_panel(adb, qq, items):
     """一键升级面板：资源够→点升级；不够→读预估时间等待；队列满→关闭读倒计时"""
     texts = [t for _, _, t, _ in items]
@@ -2433,6 +2501,15 @@ def _au_handle_panel(adb, qq, items):
     names = [t for _, _, t, _ in items if "升级" in t and "一键" not in t]
     if names:
         log("待升级项：" + "、".join(names[:8]), "info")
+
+    # 2026-11-25：点升级前按配置检查/切换「资源消耗策略」（下拉框，
+    # 切换后 items 已过期，重新 OCR 一遍供后面找升级按钮用）。
+    if (CONFIG.get("au_resource_strategy") or "").strip():
+        changed = _au_ensure_strategy(adb, items)
+        if changed:
+            img = adb.screenshot()
+            if img is not None:
+                items = _au_ocr_all(img)
 
     # 2026-11-23 实机修正：面板左下「消耗资源」显示的是「本次消耗 / 当前拥有」
     # （如 23.5万/106.4万），斜杠前小、斜杠后大恰好表示【资源充足】。旧逻辑把它当成

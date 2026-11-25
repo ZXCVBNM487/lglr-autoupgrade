@@ -543,6 +543,21 @@ def save_cfg(cfg):
         return False
 
 
+STRATEGY_CHOICES = ["填满建造队列优先", "基地升级优先", "不切换（保持游戏设置）"]
+
+
+def strategy_from_cfg(cfg=None):
+    """读 config.json 的资源消耗策略，返回下拉框显示值。"""
+    cfg = cfg if cfg is not None else load_cfg()
+    raw = cfg.get("au_resource_strategy")
+    val = "填满建造队列优先" if raw is None else str(raw).strip()
+    if val == "基地升级优先":
+        return "基地升级优先"
+    if val == "填满建造队列优先":
+        return "填满建造队列优先"
+    return "不切换（保持游戏设置）"
+
+
 def calib_minutes_from_cfg(cfg=None):
     """从 config.json 读倒计时检测（校准）间隔，返回分钟数（默认 60）。
 
@@ -957,6 +972,27 @@ def run_gui():
               activebackground="#3a414d", activeforeground=ACCENT,
               relief="flat", font=FONT_SM, padx=10, cursor="hand2",
               command=_on_calib_save).pack(side="left", padx=(8, 0))
+
+    # ---------- 资源消耗策略（一键升级面板下拉，2026-11-25）----------
+    stratrow = tk.Frame(devbox, bg=BG_PANEL)
+    stratrow.pack(fill="x", padx=12, pady=(0, 10))
+    tk.Label(stratrow, text="消耗策略", bg=BG_PANEL, fg=FG, font=FONT_SM).pack(side="left")
+    strat_var = tk.StringVar(value=strategy_from_cfg())
+    strat_cb = ttk.Combobox(stratrow, textvariable=strat_var, width=22, state="readonly",
+                            values=STRATEGY_CHOICES, font=FONT_SM)
+    strat_cb.pack(side="left", padx=(6, 10))
+
+    def _on_strategy_change(*_):
+        label = strat_var.get()
+        val = "" if label.startswith("不切换") else label
+        cfg = load_cfg()
+        cfg["au_resource_strategy"] = val
+        if not save_cfg(cfg):
+            messagebox.showerror("失败", "config.json 写入失败，可能被占用。")
+            return
+        append_log(f"[配置] 资源消耗策略已设为「{label}」；已启动的挂机需重启后生效\n", "ok")
+
+    strat_cb.bind("<<ComboboxSelected>>", _on_strategy_change)
 
     # ========== 底部实时升级倒计时条（两条并排，始终可见） ==========
     # 数据来自 state.json 的 upgrade_etas（升级循环每轮写入），GUI 定时读取并按
