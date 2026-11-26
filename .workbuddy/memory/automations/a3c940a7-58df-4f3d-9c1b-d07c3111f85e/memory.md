@@ -1,0 +1,168 @@
+# 自动同步到 GitHub 私有仓库 — 执行记录
+
+## 2026-11-01 07:23 (GMT+8)
+- **目标仓库**: ZXCVBNM487/lglr-autoupgrade (private)，分支 `main` → `origin/main`
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据，无明文令牌。
+- **变更检出**: 唯一变更是未跟踪的 `build_log_v100.txt`（构建日志）。
+- **处理**: `.gitignore` 第 4 行原本只排除 `build_log.txt`，漏掉了带版本后缀的 `build_log_v100.txt`。为落实"日志不入库"策略，补充 `build_log_*.txt` 规则（属同步配置，非代码逻辑改动）。
+- **结果**: `git add -A` → 仅 `.gitignore` 变更 → commit `d8f0f76` ("auto-sync: 2026-11-01") → `git push origin main` 成功（1839b34..d8f0f76）。
+- **结论**: 同步成功。本次入库内容仅为 .gitignore 修正，源码/文档无变化；config.json、日志、截图、构建与运行时产物均按规则被排除。
+
+## 2026-11-02 22:18 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `.workbuddy/memory/automations/a3c940a7-58df-4f3d-9c1b-d07c3111f85e/memory.md`（上轮执行记录）被纳入暂存。
+- **处理**: `git add -A` → commit `aeba1af` ("auto-sync: 2026-11-02")。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Failed to connect to github.com:443 ... Could not connect to server`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交已生成但未推送，远程落后于本地一个提交。config.json、日志、截图、构建与运行时产物均按 .gitignore 规则被排除。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更会连同本次提交一起推送。
+
+## 2026-11-03 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-02 因网络推送失败而从未入库的执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `93a338c` ("auto-sync: 2026-11-03")。
+- **推送结果**: **成功** — `d34bca5..93a338c  main -> main`（origin 此前已含 aeba1af 与 d34bca5，本次仅 93a338c 为新提交，上次网络失败遗留一并补齐）。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-03 记录将作为下一轮同步的遗留变更（与 11-01/11-02 既有模式一致）。
+
+## 2026-11-04 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据（gh auth status 正常）。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-03 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `fca752e` ("auto-sync: 2026-11-04")。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `fca752e` 已生成但未推送，远程落后于本地一个提交。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更会连同本次提交一起推送。
+
+## 2026-11-05 07:33 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-04 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `c3fc2f6` ("auto-sync: 2026-11-05")。
+- **推送结果**: **成功** — `47cadc2..c3fc2f6  main -> main`（上次 2026-11-04 网络失败遗留提交一并补齐）。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-05 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-06 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-05 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `2d4a475` ("auto-sync: 2026-11-06")。
+- **推送结果**: **成功** — `c3fc2f6..2d4a475  main -> main`。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-06 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-07 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-06 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `b32024b` ("auto-sync: 2026-11-07")。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `b32024b` 已生成但未推送，远程落后于本地一个提交。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更会连同本次提交一起推送。
+
+## 2026-11-08 07:53 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-07 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `26783f4` ("auto-sync: 2026-11-08")。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `26783f4` 已生成但未推送，远程落后于本地一个提交。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更会连同本次提交一起推送。
+
+## 2026-11-10 16:26 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-08 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `b1e18a5` ("auto-sync: 2026-11-10")。
+- **推送结果**: **成功** — `5642fb6..b1e18a5  main -> main`。本次一并补齐了 2026-11-07（b32024b）与 2026-11-08（26783f4）两次网络失败遗留的提交，`git log origin/main..HEAD` 为空，本地与远程完全同步。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-10 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-11 18:36 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: `git add -A` 后 `git status --porcelain` 输出**为空** → 工作树干净（"nothing to commit, working tree clean"），`git diff HEAD` 亦为空。
+- **结论**: **无变更**。上次 2026-11-10 的执行记录已在当时提交（b1e18a5）内，本轮回检无新增改动；按规则记录"无变更"并结束，**未执行 commit / push**。
+- 源码/文档、config.json、日志、截图、构建与运行时产物均处于已同步/已忽略状态。
+
+## 2026-11-13 07:38 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-11 执行记录，+7/-1 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `31b9166` ("auto-sync: 2026-11-13")。
+- **推送结果**: **成功** — `5c2de81..31b9166  main -> main`（干净 fast-forward）。`git log origin/main..HEAD` 为空，本地与远程完全同步；`git status --porcelain` 为空。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-13 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-14 21:03 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），keyring 凭据。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-13 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `198de87` ("auto-sync: 2026-11-14")。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `198de87` 已生成但未推送，远程落后于本地一个提交。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更会连同本次提交一起推送。
+
+## 2026-11-15 19:11 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-14 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。另有上次网络失败遗留的未推送提交 `198de87`（auto-sync: 2026-11-14）。
+- **处理**: `git add -A` → commit `abe75a1` ("auto-sync: 2026-11-15")，1 file changed, +8。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `abe75a1` 已生成但未推送；`git log origin/main..HEAD` 现含 `abe75a1` 与 `198de87` 两个提交，远程落后本地两个提交；`git status --porcelain` 为空（工作树干净）。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`（会一并补齐两个遗留提交），或下次同步运行时若有新变更一起推送。
+
+## 2026-11-16 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-15 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。另有上次网络失败遗留的未推送提交 `198de87`（11-14）与 `abe75a1`（11-15）。
+- **处理**: `git add -A` → commit `a62c329` ("auto-sync: 2026-11-16")，1 file changed, +8。
+- **推送结果**: **成功** — `31b9166..a62c329  main -> main`。本次一并补齐了 2026-11-14（198de87）与 2026-11-15（abe75a1）两次网络失败遗留的提交；`git log origin/main..HEAD` 为空，`git status --porcelain` 为空，本地与远程完全同步。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-16 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-17 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-16 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。
+- **处理**: `git add -A` → commit `f988c40` ("auto-sync: 2026-11-17")，1 file changed, +8。
+- **推送结果**: **成功** — `a62c329..f988c40  main -> main`（干净 fast-forward）。`git log origin/main..HEAD` 为空，`git status --porcelain` 为空，本地与远程完全同步。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-17 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-18 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-17 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。无遗留未推送提交。
+- **处理**: `git add -A` → commit `14594fa` ("auto-sync: 2026-11-18")，1 file changed, +8。
+- **推送结果**: **成功** — `f988c40..14594fa  main -> main`（干净 fast-forward）。`git log origin/main..HEAD` 为空，`git status --porcelain` 为空，本地与远程完全同步。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-18 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-19 19:45 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-18 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。无遗留未推送提交。
+- **处理**: `git add -A` → commit `cd687e5` ("auto-sync: 2026-11-19")，1 file changed, +8。
+- **推送结果**: **成功** — `14594fa..cd687e5  main -> main`（干净 fast-forward）。`git log origin/main..HEAD` 为空，`git status --porcelain` 为空，本地与远程完全同步。
+- **结论**: 同步成功。本次入库内容仅为自动化记忆文件遗留记录；源码/文档无变化，config.json、日志、截图、构建与运行时产物均按 .gitignore 被排除。
+- **备注**: 记忆文件在本轮提交之后才写入，故本次 2026-11-19 记录将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-20 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 2026-11-19 执行记录，+8 行）；无源码/配置/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。.gitignore 规则正常生效。无遗留未推送提交。
+- **处理**: `git add -A` → commit `9786b8b` ("auto-sync: 2026-11-20")，1 file changed, +8。
+- **推送结果**: **失败（网络）** — `fatal: unable to access 'https://github.com/ZXCVBNM487/lglr-autoupgrade.git/': Recv failure: Connection was reset`。
+- **处置**: 按规则不重试、不嵌入令牌/密码。本地提交 `9786b8b` 已生成但未推送；`git log origin/main..HEAD` 含 1 个提交，`git status --porcelain` 为空（工作树干净）。
+- **待办**: 网络恢复后，可手动 `git -C "E:/拉格朗日自动升级" push origin main`，或下次同步运行时若有新变更一起推送。
+
+## 2026-11-21 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌。
+- **变更检出**: `git add -A` 后 `git status --porcelain` **输出为空** → 无变更；工作树干净，无未跟踪文件，.gitignore 规则正常生效。
+- **提交状态**: 本地 HEAD 为 `64936ef`（perf: 新增性能档位，降低长时间挂机 CPU 占用与发热；非 auto-sync 提交，用户侧代码改动已提交并推送）；`git log origin/main..HEAD` 为空，本地与远程完全同步，**无遗留未推送提交**（上次 11-20 遗留的 `9786b8b` 已在此前补齐）。
+- **结论**: **无变更**。按规则记录并结束，**未执行 commit / push**。源码/文档、config.json、日志、截图、构建与运行时产物均处于已同步/已忽略状态。
+
+## 2026-11-22 03:00 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），无明文令牌。
+- **变更检出**: `git add -A` 后 `git status --porcelain` 唯一变更是自动化自身记忆文件 `memory.md` 的遗留新增（上次 11-21 执行记录，+6 行）；无源码/文档/config.json/日志/截图/构建与运行时产物变更，无未跟踪文件。无遗留未推送提交。
+- **处理**: commit `dc3b94d` ("auto-sync: 2026-11-22")，1 file changed, +6。
+- **推送结果**: **成功** — `64936ef..dc3b94d  main -> main`。复核 `git status --porcelain` 与 `git log origin/main..HEAD` 均为空，本地与远程完全同步。
+- **结论**: 同步成功；本次仅入库自动化记忆文件遗留记录，未改动项目代码逻辑。
+- **备注**: 本记录在本轮提交之后写入，将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 2026-11-23 07:50 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI\gh v2.103.3），凭据助手 manager（Git Credential Manager），无明文令牌。
+- **变更检出**: 本轮为**真实源码/文档改动**（区别于以往仅记忆文件遗留）：`lagrange_upgrade.py`（+95/-28，新增 point_design_xy / point_expect_texts，改造 point_double_check 与 cmd_points 的坐标换算与自检）、`README.md`、`docs/点击坐标参数表.md`（更新双入口定义与坐标表），另有 3 张 `点位校准_20261123_复核/` 下的实机复核截图（原始点击前后 + 红框标注）。无 config.json / 日志 / 构建与运行时产物入库，.gitignore 规则正常。
+- **处理**: `git add -A` → commit `7e93e34` ("auto-sync: 2026-11-23")，6 files changed, +95/-28。
+- **推送结果**: **成功** — `9675d18..7e93e34  main -> main`（干净 fast-forward）。复核 `git status --porcelain` 与 `git log origin/main..HEAD` 均为空，本地与远程完全同步。未修改任何项目代码逻辑，仅同步。
+- **备注**: 本记录在本轮提交之后写入，将作为下一轮同步的遗留变更（与既有模式一致）。
+
+## 备注
+- 2026-11-11 首次触发"无变更"分支（`git status --porcelain` 为空），依规记录并结束，未产生提交。
+- 推送失败时不重试、不嵌入令牌，仅记录并报告。
