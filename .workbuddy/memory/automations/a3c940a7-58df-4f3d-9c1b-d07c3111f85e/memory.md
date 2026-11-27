@@ -163,6 +163,13 @@
 - **推送结果**: **成功** — `9675d18..7e93e34  main -> main`（干净 fast-forward）。复核 `git status --porcelain` 与 `git log origin/main..HEAD` 均为空，本地与远程完全同步。未修改任何项目代码逻辑，仅同步。
 - **备注**: 本记录在本轮提交之后写入，将作为下一轮同步的遗留变更（与既有模式一致）。
 
+## 2026-11-27 07:55 (GMT+8)
+- **gh CLI**: 已在 PATH（C:\Program Files\GitHub CLI，gh v2.103.3），凭据助手 `manager`（Git Credential Manager），无明文令牌；origin = ZXCVBNM487/lglr-autoupgrade。
+- **变更检出**: 本轮 `git add -A` 后共 **183 个新增文件**（3103 行文本新增，约 109.5 MB），全部为未跟踪文件：自动化记忆文件 `memory.md`、2 张 `docs/screenshots/` 星图展示图，以及 `点位校准_20261122_全量` / `点位校准_20261123_{复核,终版,终版_v2,终版_v3}` 下的实机截图（177 张 PNG）、逐点探测记录（MD/JSON）与终版复核结果 JSON。无源码/配置修改；config.json、日志、build/dist、state.json 等按 .gitignore 正常排除。注意：校准目录 PNG 未被当前 .gitignore 排除（规则只忽略根目录 PNG 与 `*_shots/`、`survey_shots/`），故按 `git add -A` 原样入库。
+- **处理**: commit `91d69d5` ("auto-sync: 2026-11-27")。
+- **推送结果**: **成功** — `f7692fb..91d69d5  main -> main`（干净 fast-forward）。复核 `git status --porcelain` 与 `git log origin/main..HEAD` 均为空，本地 HEAD 与 origin/main 同为 `91d69d5`，完全同步。未修改任何项目代码逻辑。
+- **备注**: 本记录在本轮提交之后写入，将作为下一轮同步的遗留变更（与既有模式一致）。
+
 ## 备注
 - 2026-11-11 首次触发"无变更"分支（`git status --porcelain` 为空），依规记录并结束，未产生提交。
 - 推送失败时不重试、不嵌入令牌，仅记录并报告。
